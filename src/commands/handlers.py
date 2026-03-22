@@ -110,6 +110,11 @@ async def handle_credit_analysis_completed(
     agg.assert_valid_transition(ApplicationState.CREDIT_ANALYSIS_COMPLETE)
     agg.assert_no_duplicate_credit_analysis()
 
+    # Agent session guards — Gas Town ordering (Req 7.1, 7.3)
+    session_agg = await AgentSessionAggregate.load(store, session_id)
+    session_agg.assert_gas_town_ordering("CreditAnalysisCompleted")
+    session_agg.assert_not_closed()
+
     decision = CreditDecision(
         risk_tier=RiskTier(risk_tier),
         recommended_limit_usd=Decimal(str(recommended_limit_usd)),

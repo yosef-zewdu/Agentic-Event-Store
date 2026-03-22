@@ -100,6 +100,9 @@ class AgentSessionAggregate:
         self.context_token_count = p.get("context_token_count")
         self.model_version = p.get("model_version")
 
+    # AgentContextLoaded is aliased to AgentInputValidated — handle both event_type strings
+    _on_agent_input_validated = _on_agent_context_loaded
+
     def _on_agent_session_closed(self, p: dict) -> None:
         self.state = SessionState.CLOSED
 
