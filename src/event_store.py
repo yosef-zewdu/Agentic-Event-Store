@@ -327,10 +327,10 @@ class InMemoryEventStore:
         correlation_id: str | None = None,
         causation_id: str | None = None,
         aggregate_type: str | None = None,
-    ) -> list[int]:
+    ) -> int:
         """
         Accepts either BaseEvent instances or plain dicts (legacy/test usage).
-        Returns list of 0-based stream positions assigned (matches phase1 test expectations).
+        Returns the new stream version (1-based, matching the real EventStore).
         """
         async with self._locks[stream_id]:
             current = self._versions.get(stream_id, -1)
@@ -343,11 +343,14 @@ class InMemoryEventStore:
             if causation_id:
                 meta["causation_id"] = causation_id
 
-            positions = []
-            # 0-based: new stream starts at 0, subsequent appends continue
-            start = 0 if expected_version == -1 else expected_version + 1
+            # 1-based: first event in a new stream gets position 1
+            start = expected_version + 1 + 1  # next position after current version
+            # simpler: position = current_version + 1 + offset
+            # current_version=-1 → first position=1, current_version=1 → next=2, etc.
+            # 1-based: version=-1 (empty) → first pos=1; version=N → next pos=N+1
+            next_pos = max(expected_version, 0) + 1
             for i, event in enumerate(events):
-                pos = start + i
+                pos = next_pos + i
                 if isinstance(event, dict):
                     event_type = event["event_type"]
                     event_version = event.get("event_version", 1)
@@ -363,7 +366,7 @@ class InMemoryEventStore:
                     event_id=event_id,
                     stream_id=stream_id,
                     stream_position=pos,
-                    global_position=len(self._global),
+                    global_position=len(self._global) + 1,
                     event_type=event_type,
                     event_version=event_version,
                     payload=payload,
@@ -372,18 +375,18 @@ class InMemoryEventStore:
                 )
                 self._streams[stream_id].append(stored)
                 self._global.append(stored)
-                positions.append(pos)
 
-            self._versions[stream_id] = start + len(events) - 1
-            return positions
+            new_version = next_pos + len(events) - 1
+            self._versions[stream_id] = new_version
+            return new_version
 
     async def load_stream(
         self,
         stream_id: str,
-        from_position: int = 0,
+        from_position: int = 1,
         to_position: int | None = None,
-    ) -> list[dict]:
-        """Returns events as dicts for compatibility with dict-based callers."""
+    ) -> list[StoredEvent]:
+        """Returns StoredEvent instances, matching the real EventStore interface."""
         events = [
             e for e in self._streams.get(stream_id, [])
             if e.stream_position >= from_position
@@ -392,7 +395,7 @@ class InMemoryEventStore:
         result = sorted(events, key=lambda e: e.stream_position)
         if self.upcasters:
             result = [self.upcasters.upcast(e) for e in result]
-        return [e.model_dump() for e in result]
+        return result
 
     async def load_all(
         self,
