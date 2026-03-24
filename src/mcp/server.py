@@ -55,15 +55,37 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[dict]:
     from src.projections.application_summary import ApplicationSummaryProjection
     from src.projections.agent_performance import AgentPerformanceLedgerProjection
     from src.projections.compliance_audit import ComplianceAuditViewProjection
+    from src.projections.daemon import ProjectionDaemon
+    import asyncio
+
+    app_proj = ApplicationSummaryProjection()
+    agent_proj = AgentPerformanceLedgerProjection()
+    compliance_proj = ComplianceAuditViewProjection()
+
     async with store._pool.acquire() as conn:
-        await ApplicationSummaryProjection().ensure_table_exists(conn)
-        await AgentPerformanceLedgerProjection().ensure_table_exists(conn)
-        await ComplianceAuditViewProjection().ensure_table_exists(conn)
+        await app_proj.ensure_table_exists(conn)
+        await agent_proj.ensure_table_exists(conn)
+        await compliance_proj.ensure_table_exists(conn)
     logger.info("Projection tables ready.")
 
+    # Start the projection daemon as a background task
+    daemon = ProjectionDaemon(store=store, pool=store._pool)
+    daemon.register(app_proj)
+    daemon.register(agent_proj)
+    daemon.register(compliance_proj)
+    daemon_task = asyncio.create_task(daemon.run_forever(poll_interval_ms=200))
+    logger.info("Projection daemon started.")
+
     try:
-        yield {"store": store}
+        yield {"store": store, "daemon": daemon}
     finally:
+        logger.info("Stopping projection daemon…")
+        daemon.stop()
+        daemon_task.cancel()
+        try:
+            await daemon_task
+        except asyncio.CancelledError:
+            pass
         logger.info("Closing database connection pool…")
         await store.close()
         set_store(None)

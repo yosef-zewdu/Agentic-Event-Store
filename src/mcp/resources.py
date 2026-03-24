@@ -333,7 +333,7 @@ def register_resources(mcp):
         SLO: p99 < 300ms (Req 16.6).
         """
         store = get_store()
-        stream_id = f"agent-{id}-{session_id}"
+        stream_id = f"session-{session_id}"
 
         events = await store.load_stream(stream_id=stream_id)
 

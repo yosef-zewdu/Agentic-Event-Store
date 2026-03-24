@@ -25,6 +25,9 @@ from src.commands.handlers import (
     handle_fraud_screening_completed,
     handle_generate_decision,
     handle_human_review_completed,
+    handle_request_credit_analysis,
+    handle_request_fraud_screening,
+    handle_request_human_review,
     handle_start_agent_session,
     handle_submit_application,
 )
@@ -127,7 +130,48 @@ def register_tools(mcp):
 
 
     # ---------------------------------------------------------------------------
-    # Tool 2 — record_credit_analysis
+    # Tool 2 — request_credit_analysis
+    # ---------------------------------------------------------------------------
+
+    @mcp.tool()
+    async def request_credit_analysis(
+        application_id: str,
+        requested_by: str = "system",
+        priority: str = "NORMAL",
+        correlation_id: str | None = None,
+    ) -> dict:
+        """
+        Transition a submitted application to CREDIT_ANALYSIS_REQUESTED state.
+
+        Must be called after submit_application and before record_credit_analysis.
+
+        ERRORS:
+        - DomainError(InvalidStateTransition): application not in SUBMITTED state.
+        """
+        try:
+            version = await handle_request_credit_analysis(
+                store=get_store(),
+                application_id=application_id,
+                requested_by=requested_by,
+                priority=priority,
+                correlation_id=correlation_id,
+            )
+            return {"success": True, "application_id": application_id, "stream_version": version}
+        except OptimisticConcurrencyError as exc:
+            return _err(
+                "OptimisticConcurrencyError",
+                str(exc),
+                "reload_stream_and_retry",
+                {"stream_id": exc.stream_id, "actual_version": exc.actual_version},
+            )
+        except DomainError as exc:
+            return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
+        except Exception as exc:
+            return _err("InternalError", str(exc), "contact_support", {})
+
+
+    # ---------------------------------------------------------------------------
+    # Tool 3 — record_credit_analysis
     # ---------------------------------------------------------------------------
 
     @mcp.tool()
@@ -207,7 +251,44 @@ def register_tools(mcp):
 
 
     # ---------------------------------------------------------------------------
-    # Tool 3 — record_fraud_screening
+    # Tool 5 — request_fraud_screening
+    # ---------------------------------------------------------------------------
+
+    @mcp.tool()
+    async def request_fraud_screening(
+        application_id: str,
+        correlation_id: str | None = None,
+    ) -> dict:
+        """
+        Transition application from CREDIT_ANALYSIS_COMPLETE to FRAUD_SCREENING_REQUESTED.
+
+        Must be called after record_credit_analysis and before record_fraud_screening.
+
+        ERRORS:
+        - DomainError(InvalidStateTransition): application not in CREDIT_ANALYSIS_COMPLETE state.
+        """
+        try:
+            version = await handle_request_fraud_screening(
+                store=get_store(),
+                application_id=application_id,
+                correlation_id=correlation_id,
+            )
+            return {"success": True, "application_id": application_id, "stream_version": version}
+        except OptimisticConcurrencyError as exc:
+            return _err(
+                "OptimisticConcurrencyError",
+                str(exc),
+                "reload_stream_and_retry",
+                {"stream_id": exc.stream_id, "actual_version": exc.actual_version},
+            )
+        except DomainError as exc:
+            return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
+        except Exception as exc:
+            return _err("InternalError", str(exc), "contact_support", {})
+
+
+    # ---------------------------------------------------------------------------
+    # Tool 6 — record_fraud_screening
     # ---------------------------------------------------------------------------
 
     @mcp.tool()
@@ -409,6 +490,54 @@ def register_tools(mcp):
                     "expected_version": exc.expected_version,
                     "actual_version": exc.actual_version,
                 },
+            )
+        except DomainError as exc:
+            return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
+        except Exception as exc:
+            return _err("InternalError", str(exc), "contact_support", {})
+
+
+    # ---------------------------------------------------------------------------
+    # Tool 9 — request_human_review
+    # ---------------------------------------------------------------------------
+
+    @mcp.tool()
+    async def request_human_review(
+        application_id: str,
+        reason: str,
+        decision_event_id: str = "",
+        assigned_to: str | None = None,
+        correlation_id: str | None = None,
+    ) -> dict:
+        """
+        Transition application from PENDING_DECISION to PENDING_HUMAN_REVIEW.
+
+        Must be called after generate_decision and before record_human_review.
+
+        Args:
+            reason: Why human review is required (e.g. "REFER from low confidence").
+            decision_event_id: Optional event_id of the DecisionGenerated event.
+            assigned_to: Optional reviewer_id to pre-assign the review.
+
+        ERRORS:
+        - DomainError(InvalidStateTransition): application not in PENDING_DECISION state.
+        """
+        try:
+            version = await handle_request_human_review(
+                store=get_store(),
+                application_id=application_id,
+                reason=reason,
+                decision_event_id=decision_event_id,
+                assigned_to=assigned_to,
+                correlation_id=correlation_id,
+            )
+            return {"success": True, "application_id": application_id, "stream_version": version}
+        except OptimisticConcurrencyError as exc:
+            return _err(
+                "OptimisticConcurrencyError",
+                str(exc),
+                "reload_stream_and_retry",
+                {"stream_id": exc.stream_id, "actual_version": exc.actual_version},
             )
         except DomainError as exc:
             return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
