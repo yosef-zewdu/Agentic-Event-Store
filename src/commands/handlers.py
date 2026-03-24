@@ -84,6 +84,32 @@ async def handle_submit_application(
     )
 
 
+async def handle_request_credit_analysis(
+    store,
+    application_id: str,
+    requested_by: str = "system",
+    priority: str = "NORMAL",
+    correlation_id: str | None = None,
+) -> int:
+    """Append CreditAnalysisRequested to move application to CREDIT_ANALYSIS_REQUESTED state."""
+    agg = await LoanApplicationAggregate.load(store, application_id)
+    agg.assert_valid_transition(ApplicationState.CREDIT_ANALYSIS_REQUESTED)
+
+    event = CreditAnalysisRequested(
+        application_id=application_id,
+        requested_at=_now(),
+        requested_by=requested_by,
+        priority=priority,
+    )
+    return await store.append(
+        stream_id=f"loan-{application_id}",
+        events=[event],
+        expected_version=agg.version,
+        aggregate_type="loan_application",
+        correlation_id=correlation_id,
+    )
+
+
 async def handle_credit_analysis_completed(
     store,
     application_id: str,
@@ -133,6 +159,56 @@ async def handle_credit_analysis_completed(
         analysis_duration_ms=duration_ms,
         regulatory_basis=[regulatory_basis] if regulatory_basis else [],
         completed_at=_now(),
+    )
+    return await store.append(
+        stream_id=f"loan-{application_id}",
+        events=[event],
+        expected_version=agg.version,
+        aggregate_type="loan_application",
+        correlation_id=correlation_id,
+    )
+
+
+async def handle_request_fraud_screening(
+    store,
+    application_id: str,
+    correlation_id: str | None = None,
+) -> int:
+    """Append FraudScreeningRequested to move application to FRAUD_SCREENING_REQUESTED state."""
+    agg = await LoanApplicationAggregate.load(store, application_id)
+    agg.assert_valid_transition(ApplicationState.FRAUD_SCREENING_REQUESTED)
+
+    event = FraudScreeningRequested(
+        application_id=application_id,
+        requested_at=_now(),
+    )
+    return await store.append(
+        stream_id=f"loan-{application_id}",
+        events=[event],
+        expected_version=agg.version,
+        aggregate_type="loan_application",
+        correlation_id=correlation_id,
+    )
+
+
+async def handle_request_human_review(
+    store,
+    application_id: str,
+    reason: str,
+    decision_event_id: str = "",
+    assigned_to: str | None = None,
+    correlation_id: str | None = None,
+) -> int:
+    """Append HumanReviewRequested to move application to PENDING_HUMAN_REVIEW state."""
+    agg = await LoanApplicationAggregate.load(store, application_id)
+    agg.assert_valid_transition(ApplicationState.PENDING_HUMAN_REVIEW)
+
+    event = HumanReviewRequested(
+        application_id=application_id,
+        reason=reason,
+        decision_event_id=decision_event_id,
+        assigned_to=assigned_to,
+        requested_at=_now(),
     )
     return await store.append(
         stream_id=f"loan-{application_id}",
@@ -197,7 +273,7 @@ async def handle_compliance_check(
         rule_id, rule_version, passed, evidence_hash, failure_reason (optional)
     """
     agg = await LoanApplicationAggregate.load(store, application_id)
-    agg.assert_valid_transition(ApplicationState.COMPLIANCE_CHECK_COMPLETE)
+    agg.assert_valid_transition(ApplicationState.COMPLIANCE_CHECK_REQUESTED)
 
     events: list[Any] = [
         ComplianceCheckRequested(
