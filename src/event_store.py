@@ -21,6 +21,32 @@ from src.models.events import BaseEvent, StoredEvent
 from src.models.exceptions import OptimisticConcurrencyError
 
 
+def _normalise_event(event) -> dict:
+    """
+    Coerce a BaseEvent instance or a raw dict into a plain dict with the
+    keys expected by the append() insert loop:
+      event_id, event_type, event_version, payload, metadata
+    """
+    if isinstance(event, dict):
+        payload = event.get("payload") or {}
+        return {
+            "event_id":      event.get("event_id") or str(_uuid4()),
+            "event_type":    event["event_type"],
+            "event_version": event.get("event_version", 1),
+            "payload":       payload,
+            "metadata":      event.get("metadata") or {},
+        }
+    # BaseEvent (Pydantic model)
+    payload = event.payload if hasattr(event, "payload") and event.payload else event.to_payload()
+    return {
+        "event_id":      str(event.event_id),
+        "event_type":    event.event_type,
+        "event_version": event.event_version,
+        "payload":       payload,
+        "metadata":      event.metadata if isinstance(event.metadata, dict) else {},
+    }
+
+
 class EventStore:
     """Append-only PostgreSQL event store. All agents and projections use this class."""
 
@@ -100,28 +126,31 @@ class EventStore:
                     if causation_id:
                         meta["causation_id"] = causation_id
 
+                    # Normalise: accept both BaseEvent instances and raw dicts
+                    # (agents in base_agent.py pass dicts with event_type/payload keys)
+                    normalised = [_normalise_event(e) for e in events]
+
                     # 5. Insert each event
                     start = 1 if expected_version == -1 else expected_version + 1
-                    for i, event in enumerate(events):
+                    for i, event in enumerate(normalised):
                         pos = start + i
-                        merged_meta = {**event.metadata, **meta}
-                        payload = event.payload if event.payload else event.to_payload()
+                        merged_meta = {**event["metadata"], **meta}
                         await conn.execute(
                             "INSERT INTO events"
                             "(event_id, stream_id, stream_position, event_type,"
                             " event_version, payload, metadata)"
                             " VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)",
-                            event.event_id,
+                            event["event_id"],
                             stream_id,
                             pos,
-                            event.event_type,
-                            event.event_version,
-                            json.dumps(payload, default=str),
+                            event["event_type"],
+                            event["event_version"],
+                            json.dumps(event["payload"], default=str),
                             json.dumps(merged_meta, default=str),
                         )
 
                     # 6. Update stream version
-                    new_version = start + len(events) - 1
+                    new_version = start + len(normalised) - 1
                     await conn.execute(
                         "UPDATE event_streams SET current_version=$1 WHERE stream_id=$2",
                         new_version,
@@ -129,15 +158,14 @@ class EventStore:
                     )
 
                     # 7. Insert outbox rows (same transaction)
-                    for event in events:
-                        payload = event.payload if event.payload else event.to_payload()
+                    for event in normalised:
                         await conn.execute(
                             "INSERT INTO outbox(id, event_id, destination, payload)"
                             " VALUES($1,$2,$3,$4::jsonb)",
                             _uuid4(),
-                            event.event_id,
+                            event["event_id"],
                             "default",
-                            json.dumps(payload, default=str),
+                            json.dumps(event["payload"], default=str),
                         )
 
                     return new_version

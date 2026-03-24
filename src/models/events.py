@@ -237,6 +237,12 @@ class StoredEvent(BaseModel):
     metadata: dict
     recorded_at: datetime
 
+    def __getitem__(self, key: str):
+        return getattr(self, key)
+
+    def get(self, key: str, default=None):
+        return getattr(self, key, default)
+
     def with_payload(self, new_payload: dict, version: int) -> "StoredEvent":
         return self.model_copy(update={"payload": new_payload, "event_version": version})
 
