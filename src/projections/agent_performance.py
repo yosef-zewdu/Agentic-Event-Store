@@ -104,6 +104,27 @@ class AgentPerformanceLedgerProjection(BaseProjection):
         )
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _resolve_agent_id(session_id: str, conn: asyncpg.Connection) -> str:
+        """Look up the real agent_id from the AgentSessionStarted event."""
+        if not session_id:
+            return "unknown"
+        row = await conn.fetchrow(
+            "SELECT payload FROM events WHERE stream_id = $1 AND event_type = 'AgentSessionStarted' LIMIT 1",
+            f"session-{session_id}",
+        )
+        if row:
+            import json
+            payload = row["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            return payload.get("agent_id", "unknown")
+        return "unknown"
+
+    # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
 
@@ -124,8 +145,9 @@ class AgentPerformanceLedgerProjection(BaseProjection):
         """
         p = event.payload
 
-        # agent_id: prefer explicit field, fall back to session_id
-        agent_id = p.get("agent_id") or p.get("session_id", "unknown")
+        # Resolve real agent_id from the session stream
+        session_id = p.get("session_id", "")
+        agent_id = await self._resolve_agent_id(session_id, conn)
         model_version = p.get("model_version", "unknown")
 
         # Extract confidence from nested decision dict
@@ -206,7 +228,7 @@ class AgentPerformanceLedgerProjection(BaseProjection):
         model_versions: dict = p.get("model_versions") or {}
 
         for session_id in contributing:
-            agent_id = session_id  # best proxy without joining AgentSession stream
+            agent_id = await self._resolve_agent_id(session_id, conn)
             model_version = model_versions.get(session_id, "unknown")
 
             # Ensure a row exists, then increment override numerator.
@@ -237,13 +259,10 @@ class AgentPerformanceLedgerProjection(BaseProjection):
         for the orchestrator agent session.
         """
         p = event.payload
-        agent_id = p.get("agent_id") or p.get("orchestrator_session_id", "unknown")
+        session_id = p.get("orchestrator_session_id", "")
+        agent_id = await self._resolve_agent_id(session_id, conn)
         model_versions: dict = p.get("model_versions") or {}
-        # Use the orchestrator's model version if available
-        model_version = (
-            model_versions.get(agent_id)
-            or p.get("model_version", "unknown")
-        )
+        model_version = model_versions.get(agent_id) or p.get("model_version", "unknown")
         recommendation = (p.get("recommendation") or "").upper()
 
         approve_inc = 1 if recommendation == "APPROVE" else 0
