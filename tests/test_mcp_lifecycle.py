@@ -17,6 +17,7 @@ Lifecycle under test:
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -30,6 +31,7 @@ import pytest_asyncio
 import src.mcp.server as _mcp_server
 import src.mcp.tools as _tools  # noqa: F401 — registers tools as side-effect
 import src.mcp.resources as _resources  # noqa: F401 — registers resources as side-effect
+import src.mcp.utils as _mcp_utils
 
 from src.mcp.tools import (
     generate_decision,
@@ -59,7 +61,8 @@ async def mcp_store(store):
     Patch src.mcp.server._store with the test EventStore so all MCP tools
     that call get_store() use the isolated test database.
     """
-    with patch.object(_mcp_server, "_store", store):
+    
+    with patch.object(_mcp_utils, "_store", store):
         yield store
 
 
@@ -220,7 +223,7 @@ class TestMCPFullLifecycle:
         # compliance stream (daemon is not running in tests).
         await self._populate_compliance_view(mcp_store, app_id)
 
-        compliance = await get_application_compliance(id=app_id)
+        compliance = json.loads(await get_application_compliance(id=app_id))
 
         assert compliance["application_id"] == app_id
         assert compliance["record_count"] > 0, "Compliance trace must be non-empty"
