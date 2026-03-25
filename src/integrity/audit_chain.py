@@ -45,6 +45,18 @@ class IntegrityCheckResult:
     integrity_hash: str
 
 
+@dataclass
+class IntegrityVerifyResult:
+    """Returned by verify_integrity — read-only, no writes."""
+    chain_valid: bool
+    tamper_detected: bool
+    events_verified: int
+    current_hash: str
+    baseline_hash: str | None
+    verified: bool          # False when no baseline exists yet
+    reason: str             # human-readable explanation
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -125,6 +137,78 @@ async def run_integrity_check(
         tamper_detected=not chain_valid,
         events_verified=len(events_to_check),
         integrity_hash=new_hash,
+    )
+
+
+async def verify_integrity(
+    store: EventStore,
+    entity_type: str,
+    entity_id: str,
+) -> IntegrityVerifyResult:
+    """
+    Read-only integrity check — no writes to the audit stream.
+
+    - If no baseline AuditIntegrityCheckRun exists: returns verified=False,
+      reason="no baseline — run a full integrity check first"
+    - If a baseline exists: replays the full chain and compares against the
+      stored hash, returning chain_valid=True/False accordingly.
+    """
+    primary_stream = f"{entity_type}-{entity_id}"
+    audit_stream = f"audit-{entity_type}-{entity_id}"
+
+    events = await store.load_stream(primary_stream)
+    audit_events = await store.load_stream(audit_stream)
+
+    last_check = next(
+        (e for e in reversed(audit_events) if e.event_type == "AuditIntegrityCheckRun"),
+        None,
+    )
+
+    # Recompute current hash over all primary events from scratch
+    running = ""
+    for e in events:
+        running = hashlib.sha256(
+            (running + _compute_event_hash(e.payload)).encode()
+        ).hexdigest()
+    current_hash = running
+
+    if not last_check:
+        return IntegrityVerifyResult(
+            chain_valid=False,
+            tamper_detected=False,
+            events_verified=len(events),
+            current_hash=current_hash,
+            baseline_hash=None,
+            verified=False,
+            reason="no baseline — run a full integrity check first",
+        )
+
+    baseline_hash = last_check.payload.get("integrity_hash", "")
+    baseline_count = last_check.payload.get("events_verified_count", 0)
+
+    # Verify the stored chain is internally consistent
+    chain_valid = _verify_full_chain(events, audit_events)
+
+    # Also check whether new events have been added since the last baseline
+    new_events_since = len(events) - baseline_count
+    if new_events_since > 0:
+        reason = (
+            f"chain intact up to baseline ({baseline_count} events); "
+            f"{new_events_since} new event(s) since last check — re-run to extend baseline"
+        )
+    elif chain_valid:
+        reason = f"chain verified across all {len(events)} events"
+    else:
+        reason = "tamper detected — stored hash does not match recomputed hash"
+
+    return IntegrityVerifyResult(
+        chain_valid=chain_valid,
+        tamper_detected=not chain_valid,
+        events_verified=len(events),
+        current_hash=current_hash,
+        baseline_hash=baseline_hash,
+        verified=True,
+        reason=reason,
     )
 
 
