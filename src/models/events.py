@@ -499,8 +499,8 @@ class AgentSessionStarted(BaseEvent):
     application_id: str
     model_version: str
     langgraph_graph_version: str
-    context_source: str
-    context_token_count: int
+    context_source: str | None = None
+    context_token_count: int | None = None
     started_at: datetime
 
 class AgentInputValidated(BaseEvent):
