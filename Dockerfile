@@ -47,8 +47,8 @@ VOLUME ["/repo"]
 # Set working directory for analysis
 WORKDIR /repo
 
-# Set entrypoint to the CLI
-ENTRYPOINT ["python", "-m", ""]
-CMD ["--help"]
+# Set entrypoint to the MCP server
+ENTRYPOINT ["/app/.venv/bin/fastmcp", "run", "src/mcp/server.py"]
+CMD ["--log-level", "INFO"]
 
 

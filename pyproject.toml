@@ -2,29 +2,40 @@
 name = "agentic-event-store"
 version = "0.1.0"
 description = "The Ledger — Agentic Event Store & Enterprise Audit Infrastructure"
-requires-python = ">=3.11"
+readme = "README.md"
+requires-python = ">=3.12"
 dependencies = [
+    # Core event store
     "asyncpg>=0.29.0",
-    "pydantic>=2.6.0,<3.0",
-    "fastmcp>=0.9.0",
-    "python-dotenv>=1.0.0,<2.0",
-    "reportlab>=4.4.10",
-    "openpyxl>=3.1.5",
+    "pydantic>=2.12.0,<3.0",
+    "pydantic-settings>=2.13.0,<3.0",
+    "python-dotenv>=1.2.0,<2.0",
+    # MCP server
+    "fastmcp>=3.1.0",
+    "fastapi>=0.115.0,<1.0",
+    "uvicorn>=0.42.0",
+    "starlette>=0.52.0",
+    "httpx>=0.28.0",
+    # AI agents
+    "openai>=1.109.0",
+    "langgraph>=0.2.76",
+    "langchain-core>=1.2.22",
+    # Document generation (datagen)
+    "reportlab>=4.4.0",
+    "openpyxl>=3.1.0",
+    "pypdf>=6.9.2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0,<9.0",
-    "pytest-asyncio>=0.23.0,<0.25",
+    "pytest>=8.4.0,<9.0",
+    "pytest-asyncio>=0.24.0,<0.25",
     "hypothesis>=6.100.0",
+    "faker>=25.9.0,<26.0",
 ]
-datagen = [
-    "faker>=24.0.0,<26.0",
-    "reportlab>=4.2.0,<5.0",
-    "openpyxl>=3.1.0,<4.0",
-    "openai>=1.30.0,<2.0",
-    "langgraph>=0.1.0,<0.3",
-]
+
+[project.scripts]
+ledger-mcp = "src.mcp.server:mcp"
 
 [build-system]
 requires = ["hatchling"]
@@ -39,8 +50,13 @@ testpaths = ["tests"]
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0.0,<9.0",
-    "pytest-asyncio>=0.23.0,<0.25",
+    "pytest>=8.4.0,<9.0",
+    "pytest-asyncio>=0.24.0,<0.25",
     "hypothesis>=6.100.0",
-    "faker>=25.9.2",
+    "faker>=25.9.0,<26.0",
 ]
+
+
+
+[tool.uv]
+package = true

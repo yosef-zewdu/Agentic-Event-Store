@@ -209,12 +209,14 @@ CREATE TABLE applicant_registry.financial_history (
     financing_cash_flow     NUMERIC(18,2),
     free_cash_flow          NUMERIC(18,2),
     -- Computed ratios
-    debt_to_equity          DOUBLE PRECISION,
-    current_ratio           DOUBLE PRECISION,
-    debt_to_ebitda          DOUBLE PRECISION,
-    interest_coverage       DOUBLE PRECISION,
-    gross_margin            DOUBLE PRECISION,
-    net_margin              DOUBLE PRECISION,
+    debt_to_equity              DOUBLE PRECISION,
+    current_ratio               DOUBLE PRECISION,
+    debt_to_ebitda              DOUBLE PRECISION,
+    interest_coverage_ratio     DOUBLE PRECISION,
+    gross_margin                DOUBLE PRECISION,
+    ebitda_margin               DOUBLE PRECISION,
+    net_margin                  DOUBLE PRECISION,
+    balance_sheet_check         BOOLEAN NOT NULL DEFAULT TRUE,
     CONSTRAINT financial_history_pkey PRIMARY KEY (id),
     CONSTRAINT financial_history_company_year UNIQUE (company_id, fiscal_year)
 );
@@ -222,24 +224,29 @@ CREATE TABLE applicant_registry.financial_history (
 CREATE TABLE applicant_registry.compliance_flags (
     id          SERIAL      NOT NULL,
     company_id  TEXT        NOT NULL REFERENCES applicant_registry.companies(company_id),
-    flag_type   TEXT        NOT NULL,
+    flag_type   TEXT        NOT NULL CHECK (flag_type IN ('AML_WATCH','SANCTIONS_REVIEW','PEP_LINK')),
     severity    TEXT        NOT NULL CHECK (severity IN ('LOW','MEDIUM','HIGH')),
-    description TEXT        NOT NULL,
     is_active   BOOLEAN     NOT NULL DEFAULT TRUE,
-    flagged_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    resolved_at TIMESTAMPTZ,
+    added_date  DATE        NOT NULL,
+    note        TEXT,
     CONSTRAINT compliance_flags_pkey PRIMARY KEY (id)
 );
 
 CREATE TABLE applicant_registry.loan_relationships (
-    id                  SERIAL      NOT NULL,
-    company_id          TEXT        NOT NULL REFERENCES applicant_registry.companies(company_id),
-    loan_id             TEXT        NOT NULL,
-    loan_type           TEXT        NOT NULL,
+    id                  SERIAL        NOT NULL,
+    company_id          TEXT          NOT NULL REFERENCES applicant_registry.companies(company_id),
+    -- Seeder / pipeline fields
+    loan_amount         NUMERIC(18,2) NOT NULL,
+    loan_year           INTEGER       NOT NULL,
+    was_repaid          BOOLEAN       NOT NULL,
+    default_occurred    BOOLEAN       NOT NULL DEFAULT FALSE,
+    note                TEXT,
+    -- Extended tracking fields (populated by richer data sources)
+    loan_id             TEXT,
+    loan_type           TEXT,
     original_amount     NUMERIC(18,2),
     outstanding_balance NUMERIC(18,2),
-    status              TEXT        NOT NULL,   -- ACTIVE | PAID_OFF | DEFAULTED
-    default_occurred    BOOLEAN     NOT NULL DEFAULT FALSE,
+    status              TEXT,           -- ACTIVE | PAID_OFF | DEFAULTED
     originated_at       DATE,
     closed_at           DATE,
     CONSTRAINT loan_relationships_pkey PRIMARY KEY (id)

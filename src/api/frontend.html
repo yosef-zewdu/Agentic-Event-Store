@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>The Ledger — Application Viewer</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2a2d3e;
+    --accent: #6c63ff;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #f59e0b;
+    --blue: #3b82f6;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; font-size: 14px; line-height: 1.6; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+  header span { color: var(--muted); font-size: 12px; }
+  .search-bar { display: flex; gap: 8px; padding: 20px 24px; }
+  .search-bar input { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; transition: border-color .2s; }
+  .search-bar input:focus { border-color: var(--accent); }
+  .search-bar button { background: var(--accent); border: none; border-radius: var(--radius); padding: 10px 20px; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity .2s; }
+  .search-bar button:hover { opacity: .85; }
+  .container { padding: 0 24px 40px; max-width: 1200px; }
+  .error-box { background: #2d1515; border: 1px solid var(--red); border-radius: var(--radius); padding: 12px 16px; color: var(--red); margin-bottom: 16px; }
+  .loading { color: var(--muted); padding: 40px 0; text-align: center; }
+
+  /* Summary card */
+  .summary-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+  .summary-card .field label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); display: block; margin-bottom: 4px; }
+  .summary-card .field .val { font-size: 15px; font-weight: 600; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+  .badge-green { background: #14532d; color: var(--green); }
+  .badge-red { background: #450a0a; color: var(--red); }
+  .badge-yellow { background: #451a03; color: var(--yellow); }
+  .badge-blue { background: #1e3a5f; color: var(--blue); }
+  .badge-gray { background: #1e293b; color: var(--muted); }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+  .tab { padding: 10px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted); font-weight: 500; transition: all .2s; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* Timeline */
+  .timeline { position: relative; padding-left: 28px; }
+  .timeline::before { content: ''; position: absolute; left: 8px; top: 0; bottom: 0; width: 2px; background: var(--border); }
+  .tl-item { position: relative; margin-bottom: 16px; }
+  .tl-dot { position: absolute; left: -24px; top: 6px; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); border: 2px solid var(--bg); }
+  .tl-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+  .tl-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+  .tl-type { font-weight: 700; font-size: 13px; }
+  .tl-time { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .tl-pos { font-size: 11px; color: var(--muted); }
+  .tl-payload { margin-top: 8px; }
+  .tl-payload details summary { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+  .tl-payload pre { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-size: 11px; overflow-x: auto; margin-top: 6px; color: #a5b4fc; }
+
+  /* Compliance table */
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); border-bottom: 1px solid var(--border); }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  /* Agent sessions */
+  .agent-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 12px; overflow: hidden; }
+  .agent-header { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+  .agent-header:hover { background: rgba(255,255,255,.03); }
+  .agent-events { padding: 0 16px 12px; }
+  .agent-event-row { display: flex; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .agent-event-row:last-child { border-bottom: none; }
+  .agent-event-type { font-weight: 600; min-width: 200px; }
+  .agent-event-time { color: var(--muted); }
+
+  /* Agent stream tabs */
+  .agent-stream-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 16px; }
+  .agent-stream-tab { padding: 6px 12px; cursor: pointer; border: 1px solid var(--border); border-radius: 20px; color: var(--muted); font-size: 12px; font-weight: 500; transition: all .2s; }
+  .agent-stream-tab:hover { color: var(--text); border-color: var(--accent); }
+  .agent-stream-tab.active { color: var(--accent); border-color: var(--accent); background: rgba(108,99,255,.1); }
+  .agent-stream-panel { display: none; }
+  .agent-stream-panel.active { display: block; }
+
+  /* All-events stream badge */
+  .stream-label { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 10px; font-weight: 600; background: #1e293b; color: var(--muted); margin-right: 6px; font-family: monospace; }
+  .stream-loan { background: #1e3a5f; color: var(--blue); }
+  .stream-credit { background: #14532d; color: var(--green); }
+  .stream-fraud { background: #450a0a; color: var(--red); }
+  .stream-compliance { background: #451a03; color: var(--yellow); }
+  .stream-agent { background: #2d1b69; color: #a5b4fc; }
+  .stream-docpkg { background: #1a2744; color: #93c5fd; }
+
+  /* Token usage */
+  .token-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .token-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .token-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 4px; }
+  .token-card .value { font-size: 24px; font-weight: 700; }
+  .token-table td:nth-child(2), .token-table td:nth-child(3), .token-table td:nth-child(4), .token-table td:nth-child(5) { text-align: right; font-variant-numeric: tabular-nums; }
+  .fallback-warn { color: var(--yellow); font-size: 11px; }
+  .error-detail { font-size: 11px; color: var(--red); font-family: monospace; margin-top: 4px; }
+
+  /* Integrity */
+  .integrity-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .integrity-box .hash { font-family: monospace; font-size: 12px; word-break: break-all; color: #a5b4fc; margin-top: 8px; }
+
+  /* Health */
+  .health-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  .health-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .health-card .proj-name { font-weight: 700; margin-bottom: 8px; }
+  .health-card .lag { font-size: 22px; font-weight: 700; }
+  .lag-ok { color: var(--green); }
+  .lag-warn { color: var(--yellow); }
+  .lag-bad { color: var(--red); }
+</style>
+</head>
+<body>
+
+<header>
+  <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><rect width="28" height="28" rx="6" fill="#6c63ff"/><path d="M7 9h14M7 14h10M7 19h12" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+  <h1>The Ledger</h1>
+  <span>Application Viewer</span>
+</header>
+
+<div class="search-bar">
+  <input id="appInput" type="text" placeholder="Enter application ID (e.g. app-001)" value="" />
+  <button onclick="loadApplication()">Load</button>
+</div>
+
+<div class="container" id="main"></div>
+
+<script>
+const BASE = '';
+
+function stateBadge(state) {
+  if (!state) return '<span class="badge badge-gray">—</span>';
+  const s = state.toLowerCase();
+  if (s.includes('approved') || s.includes('final')) return `<span class="badge badge-green">${state}</span>`;
+  if (s.includes('declined')) return `<span class="badge badge-red">${state}</span>`;
+  if (s.includes('pending') || s.includes('awaiting')) return `<span class="badge badge-yellow">${state}</span>`;
+  return `<span class="badge badge-blue">${state}</span>`;
+}
+
+function verdictBadge(v) {
+  if (!v) return '<span class="badge badge-gray">—</span>';
+  const u = v.toUpperCase();
+  if (u === 'PASSED' || u === 'CLEAR') return `<span class="badge badge-green">${v}</span>`;
+  if (u === 'FAILED' || u === 'BLOCKED') return `<span class="badge badge-red">${v}</span>`;
+  if (u === 'NOTED') return `<span class="badge badge-yellow">${v}</span>`;
+  return `<span class="badge badge-blue">${v}</span>`;
+}
+
+function fmtDt(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString();
+}
+
+function fmtAmount(n) {
+  if (n == null) return '—';
+  return '$' + Number(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function eventDotColor(type) {
+  if (type.includes('Approved') || type.includes('Passed') || type.includes('Completed')) return '#22c55e';
+  if (type.includes('Declined') || type.includes('Failed') || type.includes('Withdrawn')) return '#ef4444';
+  if (type.includes('Requested') || type.includes('Started')) return '#6c63ff';
+  if (type.includes('Generated') || type.includes('Review')) return '#f59e0b';
+  return '#3b82f6';
+}
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({detail: r.statusText}));
+    throw new Error(err.detail || r.statusText);
+  }
+  return r.json();
+}
+
+let _appId = '';
+
+async function loadApplication() {
+  const appId = document.getElementById('appInput').value.trim();
+  if (!appId) return;
+  _appId = appId;
+  const main = document.getElementById('main');
+  main.innerHTML = '<div class="loading">Loading…</div>';
+
+  try {
+    const [summary, events] = await Promise.all([
+      fetchJSON(`${BASE}/applications/${appId}`),
+      fetchJSON(`${BASE}/applications/${appId}/events`),
+    ]);
+    renderPage(appId, summary, events);
+  } catch (e) {
+    main.innerHTML = `<div class="error-box">Error: ${e.message}</div>`;
+  }
+}
+
+function renderPage(appId, summary, events) {
+  const main = document.getElementById('main');
+  main.innerHTML = `
+    ${renderSummary(summary)}
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('events')">Loan Stream (${events.length})</div>
+      <div class="tab" onclick="switchTab('agent-streams')">Agent Streams</div>
+      <div class="tab" onclick="switchTab('all-events')">All Events</div>
+      <div class="tab" onclick="switchTab('compliance')">Compliance</div>
+      <div class="tab" onclick="switchTab('agents')">Agent Sessions</div>
+      <div class="tab" onclick="switchTab('token-usage')">Token Usage</div>
+      <div class="tab" onclick="switchTab('integrity')">Integrity</div>
+      <div class="tab" onclick="switchTab('health')">Ledger Health</div>
+    </div>
+    <div id="tab-events" class="tab-panel active">${renderTimeline(events)}</div>
+    <div id="tab-agent-streams" class="tab-panel"><div class="loading" id="agent-streams-loading">Loading agent streams…</div></div>
+    <div id="tab-all-events" class="tab-panel"><div class="loading" id="all-events-loading">Loading all events…</div></div>
+    <div id="tab-compliance" class="tab-panel"><div class="loading" id="compliance-loading">Loading compliance…</div></div>
+    <div id="tab-agents" class="tab-panel"><div class="loading" id="agents-loading">Loading agent sessions…</div></div>
+    <div id="tab-token-usage" class="tab-panel"><div class="loading" id="token-usage-loading">Loading token usage…</div></div>
+    <div id="tab-integrity" class="tab-panel"><div class="loading" id="integrity-loading">Loading integrity…</div></div>
+    <div id="tab-health" class="tab-panel"><div class="loading" id="health-loading">Loading health…</div></div>
+  `;
+
+  // Eagerly load all panels
+  loadCompliance(appId);
+  loadAgents(appId);
+  loadAgentStreams(appId);
+  loadAllEvents(appId);
+  loadTokenUsage(appId);
+  loadIntegrity(appId);
+  loadHealth();
+}
+
+function switchTab(name) {
+  const names = ['events','agent-streams','all-events','compliance','agents','token-usage','integrity','health'];
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    t.classList.toggle('active', names[i] === name);
+  });
+  document.querySelectorAll('.tab-panel').forEach(p => {
+    p.classList.toggle('active', p.id === `tab-${name}`);
+  });
+}
+
+function renderSummary(s) {
+  const decision = s.decision || '—';
+  const decBadge = decision === 'APPROVE' ? 'badge-green' : decision === 'DECLINE' ? 'badge-red' : decision === 'REFER' ? 'badge-yellow' : 'badge-gray';
+  return `
+  <div class="summary-card">
+    <div class="field"><label>Application ID</label><div class="val">${s.application_id}</div></div>
+    <div class="field"><label>State</label><div class="val">${stateBadge(s.state)}</div></div>
+    <div class="field"><label>Applicant</label><div class="val">${s.applicant_id || '—'}</div></div>
+    <div class="field"><label>Requested Amount</label><div class="val">${fmtAmount(s.requested_amount_usd)}</div></div>
+    <div class="field"><label>Approved Amount</label><div class="val">${fmtAmount(s.approved_amount_usd)}</div></div>
+    <div class="field"><label>Risk Tier</label><div class="val">${s.risk_tier ? `<span class="badge badge-blue">${s.risk_tier}</span>` : '—'}</div></div>
+    <div class="field"><label>Fraud Score</label><div class="val">${s.fraud_score != null ? Number(s.fraud_score).toFixed(3) : '—'}</div></div>
+    <div class="field"><label>Compliance</label><div class="val">${verdictBadge(s.compliance_status)}</div></div>
+    <div class="field"><label>Decision</label><div class="val"><span class="badge ${decBadge}">${decision}</span></div></div>
+    <div class="field"><label>Human Reviewer</label><div class="val">${s.human_reviewer_id || '—'}</div></div>
+    <div class="field"><label>Last Event</label><div class="val" style="font-size:12px">${s.last_event_type || '—'}</div></div>
+    <div class="field"><label>Last Event At</label><div class="val" style="font-size:12px">${fmtDt(s.last_event_at)}</div></div>
+    <div class="field"><label>Final Decision At</label><div class="val" style="font-size:12px">${fmtDt(s.final_decision_at)}</div></div>
+  </div>`;
+}
+
+function renderTimeline(events) {
+  if (!events.length) return '<p style="color:var(--muted)">No events found.</p>';
+  return `<div class="timeline">${events.map(e => `
+    <div class="tl-item">
+      <div class="tl-dot" style="background:${eventDotColor(e.event_type)}"></div>
+      <div class="tl-card">
+        <div class="tl-header">
+          <span class="tl-type">${e.event_type}</span>
+          <span class="tl-time">${fmtDt(e.recorded_at)}</span>
+        </div>
+        <div class="tl-pos" style="margin-top:2px">pos ${e.stream_position} · global ${e.global_position} · v${e.event_version}</div>
+        <div class="tl-payload">
+          <details>
+            <summary>Payload</summary>
+            <pre>${JSON.stringify(e.payload, null, 2)}</pre>
+          </details>
+        </div>
+      </div>
+    </div>`).join('')}</div>`;
+}
+
+function streamClass(streamId) {
+  if (streamId.startsWith('loan-')) return 'stream-loan';
+  if (streamId.startsWith('credit-')) return 'stream-credit';
+  if (streamId.startsWith('fraud-')) return 'stream-fraud';
+  if (streamId.startsWith('compliance-')) return 'stream-compliance';
+  if (streamId.startsWith('agent-')) return 'stream-agent';
+  if (streamId.startsWith('docpkg-')) return 'stream-docpkg';
+  return '';
+}
+
+async function loadAgentStreams(appId) {
+  try {
+    const sessions = await fetchJSON(`${BASE}/applications/${appId}/agents`);
+    if (!sessions.length) {
+      document.getElementById('tab-agent-streams').innerHTML = '<p style="color:var(--muted)">No agent streams found.</p>';
+      return;
+    }
+    // Build sub-tabs: one per agent stream
+    const tabBar = sessions.map((s, i) =>
+      `<div class="agent-stream-tab ${i === 0 ? 'active' : ''}" onclick="switchAgentStream(${i})">${s.agent_type || s.session_id}</div>`
+    ).join('');
+    const panels = sessions.map((s, i) => `
+      <div class="agent-stream-panel ${i === 0 ? 'active' : ''}" id="agent-stream-panel-${i}">
+        <div style="margin-bottom:12px;color:var(--muted);font-size:12px">
+          Stream: <code style="color:#a5b4fc">${s.session_id}</code> &nbsp;·&nbsp;
+          Agent: <strong>${s.agent_id || '—'}</strong> &nbsp;·&nbsp;
+          Model: ${s.model_version || '—'} &nbsp;·&nbsp;
+          ${s.event_count} events
+        </div>
+        <div class="timeline">${s.events.map(e => `
+          <div class="tl-item">
+            <div class="tl-dot" style="background:${eventDotColor(e.event_type)}"></div>
+            <div class="tl-card">
+              <div class="tl-header">
+                <span class="tl-type">${e.event_type}</span>
+                <span class="tl-time">${fmtDt(e.recorded_at)}</span>
+              </div>
+              <div class="tl-payload">
+                <details>
+                  <summary>Payload</summary>
+                  <pre>${JSON.stringify(e.payload, null, 2)}</pre>
+                </details>
+              </div>
+            </div>
+          </div>`).join('')}
+        </div>
+      </div>`).join('');
+    document.getElementById('tab-agent-streams').innerHTML =
+      `<div class="agent-stream-tabs">${tabBar}</div>${panels}`;
+  } catch (e) {
+    document.getElementById('tab-agent-streams').innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+function switchAgentStream(idx) {
+  document.querySelectorAll('.agent-stream-tab').forEach((t, i) => t.classList.toggle('active', i === idx));
+  document.querySelectorAll('.agent-stream-panel').forEach((p, i) => p.classList.toggle('active', i === idx));
+}
+
+async function loadAllEvents(appId) {
+  try {
+    const events = await fetchJSON(`${BASE}/applications/${appId}/all-events`);
+    if (!events.length) {
+      document.getElementById('tab-all-events').innerHTML = '<p style="color:var(--muted)">No events found.</p>';
+      return;
+    }
+    // Group count by stream
+    const counts = {};
+    events.forEach(e => { counts[e.stream_id] = (counts[e.stream_id] || 0) + 1; });
+    const summary = Object.entries(counts)
+      .map(([s, c]) => `<span class="stream-label ${streamClass(s)}">${s} (${c})</span>`)
+      .join(' ');
+    const timeline = `<div class="timeline">${events.map(e => `
+      <div class="tl-item">
+        <div class="tl-dot" style="background:${eventDotColor(e.event_type)}"></div>
+        <div class="tl-card">
+          <div class="tl-header">
+            <span class="tl-type">
+              <span class="stream-label ${streamClass(e.stream_id)}">${e.stream_id}</span>${e.event_type}
+            </span>
+            <span class="tl-time">${fmtDt(e.recorded_at)}</span>
+          </div>
+          <div class="tl-pos">global ${e.global_position} · stream pos ${e.stream_position} · v${e.event_version}</div>
+          <div class="tl-payload">
+            <details>
+              <summary>Payload</summary>
+              <pre>${JSON.stringify(e.payload, null, 2)}</pre>
+            </details>
+          </div>
+        </div>
+      </div>`).join('')}</div>`;
+    document.getElementById('tab-all-events').innerHTML =
+      `<div style="margin-bottom:16px;line-height:2">${summary}</div>${timeline}`;
+  } catch (e) {
+    document.getElementById('tab-all-events').innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+async function loadTokenUsage(appId) {
+  try {
+    const [data, pricing] = await Promise.all([
+      fetchJSON(`${BASE}/applications/${appId}/token-usage`),
+      fetchJSON(`${BASE}/ledger/pricing`).catch(() => null),
+    ]);
+    document.getElementById('tab-token-usage').innerHTML = renderTokenUsage(data, pricing);
+  } catch (e) {
+    document.getElementById('tab-token-usage').innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+function renderTokenUsage(data, pricing) {
+  const t = data.totals;
+  const anyFallbacks = t.total_fallbacks > 0;
+  const totalsHtml = `
+    <div class="token-grid">
+      <div class="token-card">
+        <div class="label">Total Tokens</div>
+        <div class="value">${t.total_tokens_used.toLocaleString()}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">
+          ↑ ${(t.total_tokens_input||0).toLocaleString()} in &nbsp;·&nbsp; ↓ ${(t.total_tokens_output||0).toLocaleString()} out
+        </div>
+      </div>
+      <div class="token-card">
+        <div class="label">LLM Calls</div>
+        <div class="value">${t.total_llm_calls}</div>
+      </div>
+      <div class="token-card">
+        <div class="label">Total Cost</div>
+        <div class="value">$${t.total_cost_usd.toFixed(6)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">
+          $${((t.total_tokens_input||0) * 1.0 / 1_000_000).toFixed(6)} input &nbsp;+&nbsp;
+          $${((t.total_tokens_output||0) * 12.0 / 1_000_000).toFixed(6)} output
+        </div>
+      </div>
+      <div class="token-card">
+        <div class="label">LLM Fallbacks</div>
+        <div class="value ${anyFallbacks ? 'lag-warn' : 'lag-ok'}">${t.total_fallbacks}</div>
+        ${anyFallbacks ? '<div class="fallback-warn">⚠ LLM failed, used defaults</div>' : ''}
+      </div>
+    </div>
+    <div style="margin-bottom:16px;font-size:12px;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px">
+      ${pricing ? `
+        Active: <span style="color:var(--accent)">${pricing.active_provider}</span> /
+        <span style="color:var(--text)">${pricing.active_model}</span>
+        &nbsp;·&nbsp;
+        ${(() => {
+          const p = pricing.pricing[pricing.active_model];
+          return p
+            ? `$${p.input}/M input · $${p.output}/M output`
+            : '<span style="color:var(--muted)">pricing unknown</span>';
+        })()}
+      ` : 'Pricing: google/gemini-3.1-pro-preview — $1.00/M input · $12.00/M output &nbsp;|&nbsp; arcee-ai/trinity-large-preview:free — $0.00'}
+    </div>`;
+
+  if (!data.agents.length) return totalsHtml + '<p style="color:var(--muted)">No agent sessions found.</p>';
+
+  const rows = data.agents.map(a => {
+    const errHtml = a.llm_errors.length
+      ? a.llm_errors.map(e => `<div class="error-detail">↳ ${e}</div>`).join('')
+      : '';
+    const tokIn = a.total_tokens_input || 0;
+    const tokOut = a.total_tokens_output || 0;
+    return `<tr>
+      <td>
+        <strong>${a.agent_type || '—'}</strong>
+        <div style="font-size:11px;color:var(--muted);font-family:monospace">${a.session_id || ''}</div>
+        ${errHtml}
+      </td>
+      <td>
+        ${a.total_tokens_used.toLocaleString()}
+        <div style="font-size:10px;color:var(--muted)">↑${tokIn.toLocaleString()} ↓${tokOut.toLocaleString()}</div>
+      </td>
+      <td>${a.total_llm_calls}</td>
+      <td>$${a.total_cost_usd.toFixed(6)}</td>
+      <td>${(a.total_duration_ms / 1000).toFixed(1)}s</td>
+      <td>${a.llm_fallback_count > 0 ? `<span class="badge badge-yellow">${a.llm_fallback_count} fallback${a.llm_fallback_count > 1 ? 's' : ''}</span>` : '<span class="badge badge-green">OK</span>'}</td>
+    </tr>`;
+  }).join('');
+
+  return totalsHtml + `
+    <table class="token-table">
+      <thead><tr>
+        <th>Agent</th><th>Tokens (in/out)</th><th>LLM Calls</th><th>Cost</th><th>Duration</th><th>Status</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function loadCompliance(appId, asOf) {
+  try {
+    const url = asOf
+      ? `${BASE}/applications/${appId}/compliance?as_of=${encodeURIComponent(asOf)}`
+      : `${BASE}/applications/${appId}/compliance`;
+    const data = await fetchJSON(url);
+    // as_of response wraps records; current state returns array directly
+    const rows = Array.isArray(data) ? data : (data.records || []);
+    const asOfLabel = data.as_of
+      ? `<div style="margin-bottom:12px;font-size:12px;color:var(--yellow)">⏱ Point-in-time view as of ${fmtDt(data.as_of)}</div>`
+      : '';
+    document.getElementById('tab-compliance').innerHTML =
+      renderComplianceControls(appId) + asOfLabel + renderComplianceTable(rows);
+  } catch (e) {
+    document.getElementById('tab-compliance').innerHTML =
+      renderComplianceControls(appId) + `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+function renderComplianceControls(appId) {
+  return `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+      <input id="asOfInput" type="datetime-local" step="1"
+        style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+               padding:8px 12px;color:var(--text);font-size:13px;outline:none" />
+      <button onclick="loadCompliance('${appId}', document.getElementById('asOfInput').value || undefined)"
+        style="background:var(--accent);border:none;border-radius:var(--radius);padding:8px 16px;
+               color:#fff;font-size:13px;font-weight:600;cursor:pointer">
+        Query as of…
+      </button>
+      <button onclick="loadCompliance('${appId}')"
+        style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+               padding:8px 16px;color:var(--text);font-size:13px;cursor:pointer">
+        Current State
+      </button>
+    </div>`;
+}
+
+function renderComplianceTable(rows) {
+  if (!rows.length) return '<p style="color:var(--muted)">No compliance records.</p>';
+  return `<table>
+    <thead><tr>
+      <th>Event Type</th><th>Rule</th><th>Version</th><th>Verdict</th>
+      <th>Evidence Hash</th><th>Regulation Set</th><th>Recorded At</th>
+    </tr></thead>
+    <tbody>${rows.map(r => `<tr>
+      <td>${r.event_type}</td>
+      <td>${r.rule_id || '—'}</td>
+      <td>${r.rule_version || '—'}</td>
+      <td>${verdictBadge(r.verdict)}</td>
+      <td style="font-family:monospace;font-size:11px">${r.evidence_hash || '—'}</td>
+      <td>${r.regulation_set_version || '—'}</td>
+      <td style="font-size:12px">${fmtDt(r.recorded_at)}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+async function loadAgents(appId) {
+  try {
+    const sessions = await fetchJSON(`${BASE}/applications/${appId}/agents`);
+    document.getElementById('tab-agents').innerHTML = renderAgents(sessions);
+  } catch (e) {
+    document.getElementById('tab-agents').innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+function renderAgents(sessions) {
+  if (!sessions.length) return '<p style="color:var(--muted)">No agent sessions found.</p>';
+  return sessions.map(s => `
+    <div class="agent-card">
+      <div class="agent-header" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? 'block' : 'none'">
+        <div>
+          <strong>${s.agent_id || 'unknown'}</strong>
+          <span style="color:var(--muted);margin-left:8px;font-size:12px">${s.agent_type || ''}</span>
+          <span style="color:var(--muted);margin-left:8px;font-size:12px">model: ${s.model_version || '—'}</span>
+        </div>
+        <div style="font-size:12px;color:var(--muted)">${s.event_count} events · ${fmtDt(s.started_at)}</div>
+      </div>
+      <div class="agent-events" style="display:none">
+        ${s.events.map(e => `
+          <div class="agent-event-row">
+            <span class="agent-event-type">${e.event_type}</span>
+            <span class="agent-event-time">${fmtDt(e.recorded_at)}</span>
+          </div>`).join('')}
+      </div>
+    </div>`).join('');
+}
+
+async function loadIntegrity(appId) {
+  try {
+    const r = await fetchJSON(`${BASE}/applications/${appId}/integrity`);
+    const statusBadge = !r.verified
+      ? `<span class="badge badge-gray">No Baseline</span>`
+      : r.tamper_detected
+        ? `<span class="badge badge-red">Tamper Detected</span>`
+        : `<span class="badge badge-green">Chain Valid</span>`;
+    document.getElementById('tab-integrity').innerHTML = `
+      <div class="integrity-box">
+        <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+          ${statusBadge}
+          <span style="color:var(--muted);font-size:13px">${r.event_count} events</span>
+          <button onclick="runIntegrityCheck('${appId}')"
+            style="margin-left:auto;background:var(--accent);border:none;border-radius:var(--radius);
+                   padding:6px 14px;color:#fff;font-size:12px;font-weight:600;cursor:pointer">
+            Run Check
+          </button>
+        </div>
+        <div style="color:var(--muted);font-size:12px;margin-bottom:4px">${r.reason}</div>
+        <div style="color:var(--muted);font-size:11px;margin-top:12px;margin-bottom:2px">Current hash</div>
+        <div class="hash">${r.current_hash}</div>
+        ${r.baseline_hash ? `
+          <div style="color:var(--muted);font-size:11px;margin-top:10px;margin-bottom:2px">Baseline hash</div>
+          <div class="hash">${r.baseline_hash}</div>` : ''}
+      </div>`;
+  } catch (e) {
+    document.getElementById('tab-integrity').innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+async function runIntegrityCheck(appId) {
+  document.getElementById('tab-integrity').innerHTML = '<div class="loading">Running integrity check…</div>';
+  try {
+    await fetch(`${BASE}/applications/${appId}/integrity/run`, { method: 'POST' });
+    await loadIntegrity(appId);
+  } catch (e) {
+    document.getElementById('tab-integrity').innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+async function loadHealth() {
+  try {
+    const h = await fetchJSON(`${BASE}/ledger/health`);
+    const cards = h.projections.map(p => {
+      const lag = p.lag_events;
+      const cls = lag === 0 ? 'lag-ok' : lag < 10 ? 'lag-warn' : 'lag-bad';
+      return `<div class="health-card">
+        <div class="proj-name">${p.name}</div>
+        <div class="lag ${cls}">${lag} events behind</div>
+        <div style="color:var(--muted);font-size:12px;margin-top:4px">checkpoint: ${p.last_position ?? '—'}</div>
+        <div style="color:var(--muted);font-size:12px">updated: ${fmtDt(p.updated_at)}</div>
+      </div>`;
+    }).join('');
+    document.getElementById('tab-health').innerHTML = `
+      <div style="margin-bottom:12px;color:var(--muted);font-size:13px">Latest global position: <strong style="color:var(--text)">${h.latest_global_position ?? '—'}</strong></div>
+      <div class="health-grid">${cards || '<p style="color:var(--muted)">No projections found.</p>'}</div>`;
+  } catch (e) {
+    document.getElementById('tab-health').innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+// Allow pressing Enter in the input
+document.getElementById('appInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') loadApplication();
+});
+</script>
+</body>
+</html>
