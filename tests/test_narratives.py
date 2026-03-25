@@ -321,13 +321,27 @@ class TestNarr02MissingEbitda:
             else:
                 return quality_response
 
-        agent = DocumentProcessingAgent(
-            agent_id="doc-agent-test", agent_type="DocumentProcessing",
-            store=store, registry=registry, client=client,
-        )
-        agent._call_llm = mock_llm
+        import tempfile
+        import src.agents.document_processor as doc_proc_module
 
-        await agent.process_application(app_id)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pathlib import Path
+            comp_dir = Path(tmpdir) / applicant_id
+            comp_dir.mkdir()
+            (comp_dir / "income_statement_2024.pdf").write_bytes(b"%PDF-1.4 mock")
+            (comp_dir / "balance_sheet_2024.pdf").write_bytes(b"%PDF-1.4 mock")
+
+            original_dir = doc_proc_module.DOCUMENTS_DIR
+            doc_proc_module.DOCUMENTS_DIR = Path(tmpdir)
+            try:
+                agent = DocumentProcessingAgent(
+                    agent_id="doc-agent-test", agent_type="DocumentProcessing",
+                    store=store, registry=registry, client=client,
+                )
+                agent._call_llm = mock_llm
+                await agent.process_application(app_id)
+            finally:
+                doc_proc_module.DOCUMENTS_DIR = original_dir
 
         docpkg_events = store.get_events(f"docpkg-{app_id}")
         qa_events = [e for e in docpkg_events if _etype(e) == "QualityAssessmentCompleted"]
