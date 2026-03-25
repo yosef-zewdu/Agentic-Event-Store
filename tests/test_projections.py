@@ -587,6 +587,19 @@ async def test_idempotency_agent_performance_ledger(store, db_pool):
         analysis_duration_ms=1500,
         completed_at=_now(),
     )
+    from src.models.events import AgentSessionStarted
+    session_start = AgentSessionStarted(
+        session_id=agent_id,
+        agent_type="credit_analysis",
+        agent_id=agent_id,
+        application_id="idem-credit-app",
+        model_version=model_version,
+        started_at=_now(),
+        langgraph_graph_version="1.0",
+        context_source="event_replay",
+        context_token_count=1000
+    )
+    await store.append(f"session-{agent_id}", [session_start], expected_version=-1)
     await store.append(f"credit-idem-credit-app", [analysis], expected_version=-1)
 
     # First pass
@@ -664,6 +677,19 @@ async def test_idempotency_human_override_rate_not_double_counted(store, db_pool
     review.payload["contributing_sessions"] = [agent_id]
     review.payload["model_versions"] = {agent_id: model_version}
 
+    from src.models.events import AgentSessionStarted
+    session_start = AgentSessionStarted(
+        session_id=agent_id,
+        agent_type="credit_analysis",
+        agent_id=agent_id,
+        application_id="override-app",
+        model_version=model_version,
+        started_at=_now(),
+        langgraph_graph_version="1.0",
+        context_source="event_replay",
+        context_token_count=1000
+    )
+    await store.append(f"session-{agent_id}", [session_start], expected_version=-1)
     await store.append("credit-override-app", [analysis], expected_version=-1)
     await store.append("loan-override-app", [review], expected_version=-1)
 
