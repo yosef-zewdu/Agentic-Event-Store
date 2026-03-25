@@ -273,7 +273,7 @@ async def handle_compliance_check(
         rule_id, rule_version, passed, evidence_hash, failure_reason (optional)
     """
     agg = await LoanApplicationAggregate.load(store, application_id)
-    agg.assert_valid_transition(ApplicationState.COMPLIANCE_CHECK_REQUESTED)
+    agg.assert_valid_transition(ApplicationState.COMPLIANCE_CHECK_COMPLETE)
 
     events: list[Any] = [
         ComplianceCheckRequested(

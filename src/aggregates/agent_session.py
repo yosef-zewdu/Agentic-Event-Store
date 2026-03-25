@@ -62,9 +62,19 @@ class AgentSessionAggregate:
     async def load(cls, store, session_id: str) -> "AgentSessionAggregate":
         """Replay the event stream to rebuild aggregate state."""
         agg = cls(session_id=session_id)
-        events = await store.load_stream(f"session-{session_id}")
-        for event in events:
-            agg._apply(event)
+
+        # Support multiple session stream naming conventions.
+        # Old agent implementation used "agent-{agent_type}-{session_id}".
+        stream_candidates = [f"session-{session_id}", f"agent-session-{session_id}", session_id]
+
+        for stream_id in stream_candidates:
+            events = await store.load_stream(stream_id)
+            if not events:
+                continue
+            for event in events:
+                agg._apply(event)
+            return agg
+
         return agg
 
     @property
