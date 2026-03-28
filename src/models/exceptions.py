@@ -30,3 +30,14 @@ class StreamNotFoundError(Exception):
     def __init__(self, stream_id: str):
         self.stream_id = stream_id
         super().__init__(f"Stream not found: {stream_id}")
+
+
+class RetryBudgetExhausted(Exception):
+    """Raised when OCC retry budget is exhausted after max_retries attempts."""
+    def __init__(self, stream_id: str, attempts: int):
+        self.stream_id = stream_id
+        self.attempts = attempts
+        super().__init__(
+            f"OCC retry budget ({attempts}) exhausted for stream {stream_id}. "
+            "Investigate whether two agents are competing for the same stream."
+        )

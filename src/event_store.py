@@ -168,6 +168,10 @@ class EventStore:
                             json.dumps(event["payload"], default=str),
                         )
 
+                    # 8. Signal listeners — NOTIFY is held until commit, so it fires
+                    #    if and only if the transaction succeeds (no spurious wakeups).
+                    await conn.execute("NOTIFY new_events")
+
                     return new_version
 
             except asyncpg.SerializationError:
@@ -260,6 +264,16 @@ class EventStore:
                 event_id,
             )
         return _row_to_stored_event(row) if row else None
+
+    async def get_stream_metadata(self, stream_id: str) -> dict | None:
+        """Return stream metadata dict or None if the stream does not exist."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT stream_id, aggregate_type, current_version, created_at, archived_at"
+                " FROM event_streams WHERE stream_id = $1",
+                stream_id,
+            )
+        return dict(row) if row else None
 
     async def archive_stream(self, stream_id: str) -> None:
         """Soft-delete a stream by setting archived_at. Events are never deleted."""
@@ -430,17 +444,29 @@ class InMemoryEventStore:
         from_position: int = 0,
         event_types: list[str] | None = None,
         batch_size: int = 500,
-    ) -> AsyncGenerator[dict, None]:
+    ) -> AsyncGenerator[StoredEvent, None]:
         for e in self._global:
             if e.global_position >= from_position:
                 if event_types is None or e.event_type in event_types:
-                    yield e.model_dump()
+                    yield e
 
     async def get_event(self, event_id: UUID) -> StoredEvent | None:
         for e in self._global:
             if e.event_id == event_id:
                 return e
         return None
+
+    async def get_stream_metadata(self, stream_id: str) -> dict | None:
+        """Return basic stream metadata or None if the stream does not exist."""
+        if stream_id not in self._versions:
+            return None
+        return {
+            "stream_id": stream_id,
+            "aggregate_type": stream_id.split("-")[0],
+            "current_version": self._versions[stream_id],
+            "created_at": None,
+            "archived_at": None,
+        }
 
     async def save_checkpoint(self, projection_name: str, position: int) -> None:
         self._checkpoints[projection_name] = position
