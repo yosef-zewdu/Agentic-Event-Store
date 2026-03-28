@@ -40,7 +40,7 @@ def _make_store() -> InMemoryEventStore:
 
 
 def _stream_id(agent_id: str, session_id: str) -> str:
-    return f"agent-{agent_id}-{session_id}"
+    return f"session-{session_id}"
 
 
 async def _append(store: InMemoryEventStore, stream_id: str, events: list, version: int) -> int:
