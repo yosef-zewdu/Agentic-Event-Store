@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from decimal import Decimal
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -170,7 +171,7 @@ async def submit_and_run(
                 store=store,
                 application_id=application_id,
                 applicant_id=applicant_id,
-                requested_amount_usd=requested_amount_usd,
+                requested_amount_usd=Decimal(str(requested_amount_usd)),
                 loan_purpose=loan_purpose,
             )
             print(f"✓ Application {application_id} submitted")

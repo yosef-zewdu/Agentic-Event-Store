@@ -92,6 +92,7 @@ class LoanApplicationAggregate:
     # Decision tracking
     recommendation: str | None = None
     confidence_score: float | None = None
+    approved_amount_usd: float | None = None  # from DecisionGenerated.approved_amount_usd
     contributing_agent_sessions: list[str] = field(default_factory=list)
 
     # Known agent sessions (for causal chain validation)
@@ -165,6 +166,7 @@ class LoanApplicationAggregate:
         self.state = ApplicationState.PENDING_DECISION
         self.recommendation = p.get("recommendation")
         self.confidence_score = p.get("confidence_score")
+        self.approved_amount_usd = p.get("approved_amount_usd")
         self.contributing_agent_sessions = p.get("contributing_agent_sessions", [])
 
     def _on_human_review_requested(self, p: dict) -> None:
