@@ -197,23 +197,29 @@ class ProjectionDaemon:
         """
         Hold a dedicated connection with LISTEN active for the daemon's lifetime.
 
-        asyncpg delivers NOTIFY payloads on this connection; each notification
-        triggers an immediate batch run (under the batch lock). The fallback poll
-        loop in run_forever() acts as a safety net if this connection is lost.
+        Reconnects with exponential backoff if the connection is lost.
+        The fallback poll loop in run_forever() acts as a safety net during reconnection.
         """
-        try:
-            async with self._pool.acquire() as conn:
-                await conn.add_listener("new_events", self._on_notify)
-                logger.info("ProjectionDaemon: LISTEN/NOTIFY active on 'new_events'")
-                # Keep the connection alive until the daemon is stopped
-                while self._running:
-                    await asyncio.sleep(1.0)
-                await conn.remove_listener("new_events", self._on_notify)
-        except Exception:
-            logger.exception(
-                "ProjectionDaemon: LISTEN/NOTIFY connection failed — "
-                "falling back to poll-only mode"
-            )
+        backoff = 1.0
+        while self._running:
+            try:
+                async with self._pool.acquire() as conn:
+                    await conn.add_listener("new_events", self._on_notify)
+                    logger.info("ProjectionDaemon: LISTEN/NOTIFY active on 'new_events'")
+                    backoff = 1.0  # reset on successful connection
+                    while self._running:
+                        await asyncio.sleep(1.0)
+                    await conn.remove_listener("new_events", self._on_notify)
+                    return  # clean shutdown
+            except Exception:
+                logger.error(
+                    "ProjectionDaemon: LISTEN/NOTIFY connection lost — "
+                    "retrying in %.1fs (poll loop continues as fallback)",
+                    backoff,
+                    exc_info=True,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)  # cap at 30s
 
     async def _on_notify(self, conn, pid: int, channel: str, payload: str) -> None:
         """Called by asyncpg when a NOTIFY new_events arrives."""

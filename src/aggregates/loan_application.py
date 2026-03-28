@@ -37,9 +37,18 @@ class ApplicationState(str, Enum):
 # Valid state transitions (Req 6.1)
 VALID_TRANSITIONS: dict[ApplicationState, list[ApplicationState]] = {
     ApplicationState.NEW: [ApplicationState.SUBMITTED],
-    ApplicationState.SUBMITTED: [ApplicationState.CREDIT_ANALYSIS_REQUESTED],
-    ApplicationState.CREDIT_ANALYSIS_REQUESTED: [ApplicationState.CREDIT_ANALYSIS_COMPLETE],
-    ApplicationState.CREDIT_ANALYSIS_COMPLETE: [ApplicationState.FRAUD_SCREENING_REQUESTED],
+    ApplicationState.SUBMITTED: [
+        ApplicationState.CREDIT_ANALYSIS_REQUESTED,
+        ApplicationState.WITHDRAWN,
+    ],
+    ApplicationState.CREDIT_ANALYSIS_REQUESTED: [
+        ApplicationState.CREDIT_ANALYSIS_COMPLETE,
+        ApplicationState.WITHDRAWN,
+    ],
+    ApplicationState.CREDIT_ANALYSIS_COMPLETE: [
+        ApplicationState.FRAUD_SCREENING_REQUESTED,
+        ApplicationState.WITHDRAWN,
+    ],
     ApplicationState.FRAUD_SCREENING_REQUESTED: [ApplicationState.FRAUD_SCREENING_COMPLETE],
     ApplicationState.FRAUD_SCREENING_COMPLETE: [ApplicationState.COMPLIANCE_CHECK_REQUESTED],
     ApplicationState.COMPLIANCE_CHECK_REQUESTED: [ApplicationState.COMPLIANCE_CHECK_COMPLETE],

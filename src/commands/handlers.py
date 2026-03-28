@@ -299,6 +299,15 @@ async def handle_compliance_check(
     rule_verdicts: list of dicts with keys:
         rule_id, rule_version, passed, evidence_hash, failure_reason (optional)
     """
+    # Validate each verdict has required keys before touching the store
+    required_keys = {"rule_id", "passed"}
+    for i, verdict in enumerate(rule_verdicts):
+        missing = required_keys - verdict.keys()
+        if missing:
+            raise DomainError(
+                f"rule_verdicts[{i}] is missing required keys: {sorted(missing)}",
+                context={"index": i, "missing_keys": sorted(missing), "verdict": verdict},
+            )
     agg = await LoanApplicationAggregate.load(store, application_id)
     agg.assert_valid_transition(ApplicationState.COMPLIANCE_CHECK_COMPLETE)
 
@@ -396,6 +405,7 @@ async def handle_generate_decision(
     confidence_score: float | None,
     model_versions: dict[str, str],
     contributing_agent_sessions: list[str],
+    approved_amount_usd: float | None = None,
     correlation_id: str | None = None,
 ) -> int:
     """Generate a loan decision (Req 9.2, 9.3).
@@ -407,6 +417,10 @@ async def handle_generate_decision(
 
     # Confidence floor enforcement (Req 8.2)
     agg.assert_confidence_floor(confidence_score, recommendation)
+
+    # Approved amount cap (Req 8.5)
+    if approved_amount_usd is not None and recommendation.upper() == "APPROVE":
+        agg.assert_approved_amount_cap(approved_amount_usd)
 
     # Compliance dependency check at service layer (Req 8.3, 9.3)
     compliance = await ComplianceRecordAggregate.load(store, application_id)
@@ -539,3 +553,28 @@ async def handle_start_agent_session(
         correlation_id=correlation_id,
     )
     return sid
+
+
+async def handle_withdraw_application(
+    store,
+    application_id: str,
+    reason: str,
+    withdrawn_by: str = "applicant",
+    correlation_id: str | None = None,
+) -> int:
+    """Withdraw a loan application (moves to WITHDRAWN terminal state)."""
+    agg = await LoanApplicationAggregate.load(store, application_id)
+    agg.assert_valid_transition(ApplicationState.WITHDRAWN)
+
+    event = ApplicationWithdrawn(
+        application_id=application_id,
+        reason=reason,
+        withdrawn_at=_now(),
+    )
+    return await store.append(
+        stream_id=f"loan-{application_id}",
+        events=[event],
+        expected_version=agg.version,
+        aggregate_type="loan_application",
+        correlation_id=correlation_id,
+    )
