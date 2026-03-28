@@ -389,13 +389,15 @@ async def record_compliance_check(
     Record compliance check results for a loan application.
 
     Each entry in rule_verdicts must contain:
-    rule_id (str), rule_version (str), passed (bool),
-    evidence_hash (str), failure_reason (str, optional).
+    rule_id (str), passed (bool).
+    Optional: rule_version (str), evidence_hash (str), failure_reason (str).
 
     PRECONDITIONS:
     - Application must be in ComplianceReview / COMPLIANCE_CHECK_REQUESTED state.
 
     ERRORS:
+    - ValidationError: a verdict is missing required keys (rule_id, passed).
+    suggested_action: ensure_each_verdict_has_rule_id_and_passed
     - OptimisticConcurrencyError: concurrent write conflict.
     suggested_action: reload_stream_and_retry
     - DomainError(InvalidStateTransition): check application state.
@@ -403,6 +405,17 @@ async def record_compliance_check(
     - DomainError: business rule violation.
     suggested_action: check_error_context_for_details
     """
+    # Validate structure before touching the store
+    required_keys = {"rule_id", "passed"}
+    for i, verdict in enumerate(rule_verdicts):
+        missing = required_keys - verdict.keys()
+        if missing:
+            return _err(
+                "ValidationError",
+                f"rule_verdicts[{i}] is missing required keys: {sorted(missing)}",
+                "ensure_each_verdict_has_rule_id_and_passed",
+                {"index": i, "missing_keys": sorted(missing)},
+            )
     try:
         version = await with_occ_retry(
             handle_compliance_check,
@@ -433,6 +446,7 @@ async def generate_decision(
     confidence_score: float | None,
     model_versions: dict[str, str],
     contributing_agent_sessions: list[str],
+    approved_amount_usd: float | None = None,
     correlation_id: str | None = None,
 ) -> dict:
     """
@@ -441,6 +455,9 @@ async def generate_decision(
     CONFIDENCE FLOOR (Req 15.5):
     - When confidence_score < 0.6, recommendation is overridden to "REFER"
     regardless of the submitted value.
+
+    APPROVED AMOUNT CAP (Req 8.5):
+    - approved_amount_usd must not exceed the originally requested amount.
 
     PRECONDITIONS:
     - All compliance checks must be cleared (ComplianceRulePassed for all rules).
@@ -457,6 +474,8 @@ async def generate_decision(
     suggested_action: query_ledger_applications_id_for_current_state
     - DomainError(InvalidContributingSession): a session did not process this application.
     suggested_action: verify_contributing_agent_sessions
+    - DomainError(ApprovedAmountExceedsRequested): reduce approved_amount_usd.
+    suggested_action: set_approved_amount_usd_at_or_below_requested
     """
     # Req 15.5 — enforce confidence floor before delegating to handler
     effective_recommendation = recommendation
@@ -474,6 +493,7 @@ async def generate_decision(
             confidence_score=confidence_score,
             model_versions=model_versions,
             contributing_agent_sessions=contributing_agent_sessions,
+            approved_amount_usd=approved_amount_usd,
             correlation_id=correlation_id,
         )
         return {
@@ -670,7 +690,7 @@ async def run_integrity_check(
 
     PRECONDITIONS (Req 15.6):
     - caller_role must be one of: compliance_officer, compliance_admin, auditor.
-    Any other role returns AuthorizationError immediately.
+    - caller_id must be a non-empty string (used as the rate-limit key).
 
     RATE LIMIT (Req 15.7):
     - Maximum 1 call per minute per (caller_id, entity_type, entity_id) triple.
@@ -679,6 +699,8 @@ async def run_integrity_check(
     ERRORS:
     - AuthorizationError: caller_role is not authorised.
     suggested_action: use_authorised_compliance_role
+    - ValidationError: caller_id is empty.
+    suggested_action: provide_non_empty_caller_id
     - RateLimitError: rate limit exceeded.
     suggested_action: wait_60_seconds_before_retrying
     - OptimisticConcurrencyError: concurrent integrity check in progress.
@@ -696,8 +718,17 @@ async def run_integrity_check(
             {"caller_role": caller_role, "authorised_roles": sorted(_COMPLIANCE_ROLES)},
         )
 
+    # caller_id must be non-empty — otherwise the rate limit key is meaningless
+    if not caller_id or not caller_id.strip():
+        return _err(
+            "ValidationError",
+            "caller_id must be a non-empty string to enforce per-caller rate limiting",
+            "provide_non_empty_caller_id",
+            {"field": "caller_id"},
+        )
+
     # Req 15.7 — 1/minute rate limit keyed by caller + entity (persisted in PostgreSQL)
-    rate_key = f"{caller_id}:{entity_type}:{entity_id}"
+    rate_key = f"{caller_id.strip()}:{entity_type}:{entity_id}"
     wait = await _check_and_set_rate_limit(rate_key)
     if wait is not None:
         return _err(
@@ -733,6 +764,39 @@ async def run_integrity_check(
                 "actual_version": exc.actual_version,
             },
         )
+    except DomainError as exc:
+        return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
+    except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
+        return _err("InternalError", str(exc), "contact_support", {})
+
+
+async def withdraw_application(
+    application_id: str,
+    reason: str,
+    correlation_id: str | None = None,
+) -> dict:
+    """
+    Withdraw a loan application, moving it to the WITHDRAWN terminal state.
+
+    Valid from: SUBMITTED, CREDIT_ANALYSIS_REQUESTED, CREDIT_ANALYSIS_COMPLETE.
+
+    ERRORS:
+    - DomainError(InvalidStateTransition): application is past the point of withdrawal.
+    suggested_action: query_ledger_applications_id_for_current_state
+    """
+    from src.commands.handlers import handle_withdraw_application
+    try:
+        version = await with_occ_retry(
+            handle_withdraw_application,
+            store=get_store(),
+            application_id=application_id,
+            reason=reason,
+            correlation_id=correlation_id,
+        )
+        return {"success": True, "application_id": application_id, "stream_version": version}
+    except RetryBudgetExhausted as exc:
+        return _err("RetryBudgetExhausted", str(exc), "investigate_contention", {"stream_id": exc.stream_id})
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except Exception as exc:
@@ -808,3 +872,4 @@ def register_tools(mcp):
     mcp.tool()(start_agent_session)
     mcp.tool()(run_integrity_check)
     mcp.tool()(generate_regulatory_package)
+    mcp.tool()(withdraw_application)
