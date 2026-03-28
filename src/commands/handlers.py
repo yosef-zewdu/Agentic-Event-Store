@@ -12,8 +12,10 @@ here — aggregates never load other aggregates' streams directly.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from src.aggregates.agent_session import AgentSessionAggregate
@@ -38,11 +40,36 @@ from src.models.events import (
     HumanReviewCompleted,
     HumanReviewRequested,
 )
-from src.models.exceptions import DomainError
+from src.models.exceptions import DomainError, OptimisticConcurrencyError, RetryBudgetExhausted
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# OCC retry helper
+# ---------------------------------------------------------------------------
+
+async def with_occ_retry(handler_fn, *args, max_retries: int = 3, **kwargs):
+    """
+    Call handler_fn(*args, **kwargs) with automatic OCC retry and exponential backoff.
+
+    Each retry reloads the aggregate from scratch (because handler_fn does that
+    internally), so the retry is safe and correct.
+
+    Backoff schedule: 50ms, 100ms, 200ms (doubles each attempt).
+    Raises RetryBudgetExhausted after max_retries failed attempts.
+    """
+    last_exc: OptimisticConcurrencyError | None = None
+    for attempt in range(max_retries):
+        try:
+            return await handler_fn(*args, **kwargs)
+        except OptimisticConcurrencyError as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                await asyncio.sleep(0.050 * (2 ** attempt))  # 50ms, 100ms, 200ms
+    raise RetryBudgetExhausted(last_exc.stream_id, max_retries) from last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +80,7 @@ async def handle_submit_application(
     store,
     application_id: str,
     applicant_id: str,
-    requested_amount_usd: float,
+    requested_amount_usd: Decimal,
     loan_purpose: str = "working_capital",
     loan_term_months: int = 12,
     submission_channel: str = "web",
@@ -275,13 +302,17 @@ async def handle_compliance_check(
     agg = await LoanApplicationAggregate.load(store, application_id)
     agg.assert_valid_transition(ApplicationState.COMPLIANCE_CHECK_COMPLETE)
 
-    events: list[Any] = [
-        ComplianceCheckRequested(
+    # Only prepend ComplianceCheckRequested if the compliance stream is new.
+    # If the stream already has events, the caller already staged it — prepending
+    # again would create a duplicate that appears as two initiations in audit queries.
+    compliance_version = await store.stream_version(f"compliance-{application_id}")
+    events: list[Any] = []
+    if compliance_version == -1:
+        events.append(ComplianceCheckRequested(
             application_id=application_id,
             requested_at=_now(),
             regulation_set_version=regulation_set_version,
-        )
-    ]
+        ))
 
     for verdict in rule_verdicts:
         now = _now()
@@ -324,8 +355,7 @@ async def handle_compliance_check(
         completed_at=_now(),
     ))
 
-    # Append to compliance stream
-    compliance_version = await store.stream_version(f"compliance-{application_id}")
+    # Append to compliance stream (compliance_version already fetched above)
     await store.append(
         stream_id=f"compliance-{application_id}",
         events=events,
@@ -433,7 +463,7 @@ async def handle_human_review_completed(
     if decision.upper() == "APPROVE":
         final_event: Any = ApplicationApproved(
             application_id=application_id,
-            approved_amount_usd=agg.requested_amount_usd or 0.0,
+            approved_amount_usd=agg.approved_amount_usd or agg.requested_amount_usd or 0.0,
             approved_by=reviewer_id,
             approved_at=_now(),
         )
