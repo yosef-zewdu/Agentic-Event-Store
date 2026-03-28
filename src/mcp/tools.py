@@ -10,7 +10,9 @@ For multi-process deployments, move these to a shared Redis key.
 """
 
 from __future__ import annotations
-import time
+import logging
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from src.commands.handlers import (
     handle_compliance_check,
@@ -23,21 +25,77 @@ from src.commands.handlers import (
     handle_request_human_review,
     handle_start_agent_session,
     handle_submit_application,
+    with_occ_retry,
 )
 from src.integrity.audit_chain import run_integrity_check as _run_integrity_check
 from src.mcp.utils import get_store
-from src.models.exceptions import DomainError, OptimisticConcurrencyError, StreamNotFoundError
+from src.models.exceptions import DomainError, OptimisticConcurrencyError, RetryBudgetExhausted, StreamNotFoundError
 
 # ---------------------------------------------------------------------------
-# Rate-limit state for run_integrity_check (Req 15.7): 1 call/minute per caller
+# Rate-limit for run_integrity_check (Req 15.7): 1 call/minute per caller
+# State is persisted in PostgreSQL so it survives restarts and is shared
+# across multiple service instances.
 # ---------------------------------------------------------------------------
-_integrity_last_called: dict[str, float] = {}
 _INTEGRITY_RATE_LIMIT_SECONDS = 60.0
+
+_CREATE_RATE_LIMIT_TABLE = """
+    CREATE TABLE IF NOT EXISTS integrity_rate_limits (
+        rate_key       TEXT        PRIMARY KEY,
+        last_called_at TIMESTAMPTZ NOT NULL
+    )
+"""
+
+async def _check_and_set_rate_limit(rate_key: str) -> float | None:
+    """
+    Atomically check and set the rate limit for a given key using PostgreSQL.
+
+    Returns None if the call is allowed (and updates last_called_at).
+    Returns the number of seconds to wait if the rate limit is exceeded.
+
+    Using a single conditional UPDATE ensures atomicity across multiple processes.
+    """
+    store = get_store()
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=_INTEGRITY_RATE_LIMIT_SECONDS)
+
+    async with store._pool.acquire() as conn:
+        await conn.execute(_CREATE_RATE_LIMIT_TABLE)
+
+        # Try to insert (first call) or update only if last_called_at is old enough.
+        # RETURNING last_called_at is NULL when the WHERE clause blocked the update.
+        updated = await conn.fetchval(
+            """
+            INSERT INTO integrity_rate_limits (rate_key, last_called_at)
+            VALUES ($1, $2)
+            ON CONFLICT (rate_key) DO UPDATE
+                SET last_called_at = EXCLUDED.last_called_at
+                WHERE integrity_rate_limits.last_called_at < $3
+            RETURNING last_called_at
+            """,
+            rate_key, now, cutoff,
+        )
+
+        if updated is not None:
+            return None  # allowed
+
+        # Rate-limited — fetch the actual last_called_at to compute wait time
+        last = await conn.fetchval(
+            "SELECT last_called_at FROM integrity_rate_limits WHERE rate_key = $1",
+            rate_key,
+        )
+        if last is None:
+            return None  # race: another process just cleared it
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        elapsed = (now - last).total_seconds()
+        return max(1.0, _INTEGRITY_RATE_LIMIT_SECONDS - elapsed)
 
 # ---------------------------------------------------------------------------
 # Authorised compliance roles (Req 15.6)
 # ---------------------------------------------------------------------------
 _COMPLIANCE_ROLES = {"compliance_officer", "compliance_admin", "auditor"}
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -83,11 +141,12 @@ async def submit_application(
     suggested_action: check_error_context_for_details
     """
     try:
+        # No OCC retry here — a duplicate application_id is a hard error, not a race.
         version = await handle_submit_application(
             store=get_store(),
             application_id=application_id,
             applicant_id=applicant_id,
-            requested_amount_usd=requested_amount_usd,
+            requested_amount_usd=Decimal(str(requested_amount_usd)),
             loan_purpose=loan_purpose,
             loan_term_months=loan_term_months,
             submission_channel=submission_channel,
@@ -107,6 +166,7 @@ async def submit_application(
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
         return _err("InternalError", str(exc), "contact_support", {})
 
 
@@ -128,7 +188,8 @@ async def request_credit_analysis(
     - DomainError(InvalidStateTransition): application not in SUBMITTED state.
     """
     try:
-        version = await handle_request_credit_analysis(
+        version = await with_occ_retry(
+            handle_request_credit_analysis,
             store=get_store(),
             application_id=application_id,
             requested_by=requested_by,
@@ -136,16 +197,12 @@ async def request_credit_analysis(
             correlation_id=correlation_id,
         )
         return {"success": True, "application_id": application_id, "stream_version": version}
-    except OptimisticConcurrencyError as exc:
-        return _err(
-            "OptimisticConcurrencyError",
-            str(exc),
-            "reload_stream_and_retry",
-            {"stream_id": exc.stream_id, "actual_version": exc.actual_version},
-        )
+    except RetryBudgetExhausted as exc:
+        return _err("RetryBudgetExhausted", str(exc), "investigate_contention", {"stream_id": exc.stream_id})
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
         return _err("InternalError", str(exc), "contact_support", {})
 
 
@@ -187,7 +244,8 @@ async def record_credit_analysis(
     suggested_action: submit_credit_analysis_superseded_event_first
     """
     try:
-        version = await handle_credit_analysis_completed(
+        version = await with_occ_retry(
+            handle_credit_analysis_completed,
             store=get_store(),
             application_id=application_id,
             agent_id=agent_id,
@@ -203,17 +261,8 @@ async def record_credit_analysis(
             correlation_id=correlation_id,
         )
         return {"success": True, "application_id": application_id, "stream_version": version}
-    except OptimisticConcurrencyError as exc:
-        return _err(
-            "OptimisticConcurrencyError",
-            str(exc),
-            "reload_stream_and_retry",
-            {
-                "stream_id": exc.stream_id,
-                "expected_version": exc.expected_version,
-                "actual_version": exc.actual_version,
-            },
-        )
+    except RetryBudgetExhausted as exc:
+        return _err("RetryBudgetExhausted", str(exc), "investigate_contention", {"stream_id": exc.stream_id})
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except StreamNotFoundError as exc:
@@ -224,6 +273,7 @@ async def record_credit_analysis(
             {"stream_id": exc.stream_id},
         )
     except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
         return _err("InternalError", str(exc), "contact_support", {})
 
 
@@ -243,22 +293,19 @@ async def request_fraud_screening(
     - DomainError(InvalidStateTransition): application not in CREDIT_ANALYSIS_COMPLETE state.
     """
     try:
-        version = await handle_request_fraud_screening(
+        version = await with_occ_retry(
+            handle_request_fraud_screening,
             store=get_store(),
             application_id=application_id,
             correlation_id=correlation_id,
         )
         return {"success": True, "application_id": application_id, "stream_version": version}
-    except OptimisticConcurrencyError as exc:
-        return _err(
-            "OptimisticConcurrencyError",
-            str(exc),
-            "reload_stream_and_retry",
-            {"stream_id": exc.stream_id, "actual_version": exc.actual_version},
-        )
+    except RetryBudgetExhausted as exc:
+        return _err("RetryBudgetExhausted", str(exc), "investigate_contention", {"stream_id": exc.stream_id})
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
         return _err("InternalError", str(exc), "contact_support", {})
 
 
@@ -307,7 +354,8 @@ async def record_fraud_screening(
         )
 
     try:
-        version = await handle_fraud_screening_completed(
+        version = await with_occ_retry(
+            handle_fraud_screening_completed,
             store=get_store(),
             application_id=application_id,
             agent_id=agent_id,
@@ -319,20 +367,12 @@ async def record_fraud_screening(
             correlation_id=correlation_id,
         )
         return {"success": True, "application_id": application_id, "stream_version": version}
-    except OptimisticConcurrencyError as exc:
-        return _err(
-            "OptimisticConcurrencyError",
-            str(exc),
-            "reload_stream_and_retry",
-            {
-                "stream_id": exc.stream_id,
-                "expected_version": exc.expected_version,
-                "actual_version": exc.actual_version,
-            },
-        )
+    except RetryBudgetExhausted as exc:
+        return _err("RetryBudgetExhausted", str(exc), "investigate_contention", {"stream_id": exc.stream_id})
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
         return _err("InternalError", str(exc), "contact_support", {})
 
 
@@ -364,7 +404,8 @@ async def record_compliance_check(
     suggested_action: check_error_context_for_details
     """
     try:
-        version = await handle_compliance_check(
+        version = await with_occ_retry(
+            handle_compliance_check,
             store=get_store(),
             application_id=application_id,
             rule_verdicts=rule_verdicts,
@@ -372,20 +413,12 @@ async def record_compliance_check(
             correlation_id=correlation_id,
         )
         return {"success": True, "application_id": application_id, "stream_version": version}
-    except OptimisticConcurrencyError as exc:
-        return _err(
-            "OptimisticConcurrencyError",
-            str(exc),
-            "reload_stream_and_retry",
-            {
-                "stream_id": exc.stream_id,
-                "expected_version": exc.expected_version,
-                "actual_version": exc.actual_version,
-            },
-        )
+    except RetryBudgetExhausted as exc:
+        return _err("RetryBudgetExhausted", str(exc), "investigate_contention", {"stream_id": exc.stream_id})
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
         return _err("InternalError", str(exc), "contact_support", {})
 
 
@@ -431,7 +464,8 @@ async def generate_decision(
         effective_recommendation = "REFER"
 
     try:
-        version = await handle_generate_decision(
+        version = await with_occ_retry(
+            handle_generate_decision,
             store=get_store(),
             application_id=application_id,
             agent_id=agent_id,
@@ -449,20 +483,12 @@ async def generate_decision(
             "recommendation": effective_recommendation,
             "confidence_floor_applied": effective_recommendation != recommendation,
         }
-    except OptimisticConcurrencyError as exc:
-        return _err(
-            "OptimisticConcurrencyError",
-            str(exc),
-            "reload_stream_and_retry",
-            {
-                "stream_id": exc.stream_id,
-                "expected_version": exc.expected_version,
-                "actual_version": exc.actual_version,
-            },
-        )
+    except RetryBudgetExhausted as exc:
+        return _err("RetryBudgetExhausted", str(exc), "investigate_contention", {"stream_id": exc.stream_id})
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
         return _err("InternalError", str(exc), "contact_support", {})
 
 
@@ -490,7 +516,8 @@ async def request_human_review(
     - DomainError(InvalidStateTransition): application not in PENDING_DECISION state.
     """
     try:
-        version = await handle_request_human_review(
+        version = await with_occ_retry(
+            handle_request_human_review,
             store=get_store(),
             application_id=application_id,
             reason=reason,
@@ -499,16 +526,12 @@ async def request_human_review(
             correlation_id=correlation_id,
         )
         return {"success": True, "application_id": application_id, "stream_version": version}
-    except OptimisticConcurrencyError as exc:
-        return _err(
-            "OptimisticConcurrencyError",
-            str(exc),
-            "reload_stream_and_retry",
-            {"stream_id": exc.stream_id, "actual_version": exc.actual_version},
-        )
+    except RetryBudgetExhausted as exc:
+        return _err("RetryBudgetExhausted", str(exc), "investigate_contention", {"stream_id": exc.stream_id})
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
         return _err("InternalError", str(exc), "contact_support", {})
 
 
@@ -546,7 +569,8 @@ async def record_human_review(
         )
 
     try:
-        version = await handle_human_review_completed(
+        version = await with_occ_retry(
+            handle_human_review_completed,
             store=get_store(),
             application_id=application_id,
             reviewer_id=reviewer_id,
@@ -560,20 +584,12 @@ async def record_human_review(
             "stream_version": version,
             "final_decision": decision.upper(),
         }
-    except OptimisticConcurrencyError as exc:
-        return _err(
-            "OptimisticConcurrencyError",
-            str(exc),
-            "reload_stream_and_retry",
-            {
-                "stream_id": exc.stream_id,
-                "expected_version": exc.expected_version,
-                "actual_version": exc.actual_version,
-            },
-        )
+    except RetryBudgetExhausted as exc:
+        return _err("RetryBudgetExhausted", str(exc), "investigate_contention", {"stream_id": exc.stream_id})
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
         return _err("InternalError", str(exc), "contact_support", {})
 
 
@@ -611,7 +627,8 @@ async def start_agent_session(
     suggested_action: check_error_context_for_details
     """
     try:
-        sid = await handle_start_agent_session(
+        sid = await with_occ_retry(
+            handle_start_agent_session,
             store=get_store(),
             agent_id=agent_id,
             agent_type=agent_type,
@@ -630,16 +647,12 @@ async def start_agent_session(
             # AgentSessionStarted = position 1, AgentContextLoaded = position 2
             "context_position": 2,
         }
-    except OptimisticConcurrencyError as exc:
-        return _err(
-            "OptimisticConcurrencyError",
-            str(exc),
-            "use_unique_session_id_or_omit_to_auto_generate",
-            {"stream_id": exc.stream_id, "actual_version": exc.actual_version},
-        )
+    except RetryBudgetExhausted as exc:
+        return _err("RetryBudgetExhausted", str(exc), "investigate_contention", {"stream_id": exc.stream_id})
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
         return _err("InternalError", str(exc), "contact_support", {})
 
 
@@ -683,21 +696,16 @@ async def run_integrity_check(
             {"caller_role": caller_role, "authorised_roles": sorted(_COMPLIANCE_ROLES)},
         )
 
-    # Req 15.7 — 1/minute rate limit keyed by caller + entity
+    # Req 15.7 — 1/minute rate limit keyed by caller + entity (persisted in PostgreSQL)
     rate_key = f"{caller_id}:{entity_type}:{entity_id}"
-    now = time.monotonic()
-    last = _integrity_last_called.get(rate_key, 0.0)
-    elapsed = now - last
-    if elapsed < _INTEGRITY_RATE_LIMIT_SECONDS:
-        wait = int(_INTEGRITY_RATE_LIMIT_SECONDS - elapsed) + 1
+    wait = await _check_and_set_rate_limit(rate_key)
+    if wait is not None:
         return _err(
             "RateLimitError",
-            f"Integrity check rate limit exceeded. Wait {wait}s before retrying.",
+            f"Integrity check rate limit exceeded. Wait {int(wait) + 1}s before retrying.",
             "wait_60_seconds_before_retrying",
-            {"retry_after_seconds": wait, "rate_limit_seconds": _INTEGRITY_RATE_LIMIT_SECONDS},
+            {"retry_after_seconds": int(wait) + 1, "rate_limit_seconds": _INTEGRITY_RATE_LIMIT_SECONDS},
         )
-
-    _integrity_last_called[rate_key] = now
 
     try:
         result = await _run_integrity_check(
@@ -728,6 +736,62 @@ async def run_integrity_check(
     except DomainError as exc:
         return _err("DomainError", str(exc), "check_error_context_for_details", exc.context)
     except Exception as exc:
+        logger.exception("Unexpected error in MCP tool: %s", exc)
+        return _err("InternalError", str(exc), "contact_support", {})
+
+
+async def generate_regulatory_package(
+    entity_type: str,
+    entity_id: str,
+    examination_date: str,
+) -> dict:
+    """
+    Generate a regulatory examination package for a loan application (Req 19).
+
+    Produces a self-contained JSON document containing:
+    - Complete event stream snapshot up to examination_date (Req 19.1)
+    - Projection states at that date: ApplicationSummary + ComplianceAuditView (Req 19.2)
+    - Cryptographic audit chain integrity result (Req 19.3)
+    - Human-readable narrative summary (Req 19.4)
+    - Agent model versions and confidence scores (Req 19.4)
+    - Causal chain traversal via recursive CTE on causation_id (Req 19.4)
+
+    Args:
+        entity_type:      Stream prefix, e.g. "loan"
+        entity_id:        Entity identifier, e.g. "app-12345"
+        examination_date: ISO 8601 UTC timestamp — only events up to this date
+                          are included (e.g. "2025-01-31T23:59:59Z")
+
+    ERRORS:
+    - InvalidTimestamp: examination_date is not a valid ISO 8601 timestamp
+    - InternalError: unexpected failure during package generation
+    """
+    from src.integrity.regulatory_package import generate_regulatory_package as _gen_pkg
+
+    # Parse examination_date
+    try:
+        exam_dt = datetime.fromisoformat(examination_date.replace("Z", "+00:00"))
+    except (ValueError, AttributeError) as exc:
+        return _err(
+            "InvalidTimestamp",
+            f"examination_date must be an ISO 8601 timestamp, got: {examination_date!r}",
+            "provide_iso8601_timestamp",
+            {"example": "2025-01-31T23:59:59Z"},
+        )
+
+    try:
+        store = get_store()
+        pool = store._pool  # may be None in InMemory mode
+        pkg = await _gen_pkg(
+            store=store,
+            pool=pool,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            examination_date=exam_dt,
+        )
+        return {"success": True, **pkg.to_dict()}
+    except Exception as exc:
+        logger.exception("Unexpected error in generate_regulatory_package: %s", exc)
         return _err("InternalError", str(exc), "contact_support", {})
 
 
@@ -743,3 +807,4 @@ def register_tools(mcp):
     mcp.tool()(record_human_review)
     mcp.tool()(start_agent_session)
     mcp.tool()(run_integrity_check)
+    mcp.tool()(generate_regulatory_package)

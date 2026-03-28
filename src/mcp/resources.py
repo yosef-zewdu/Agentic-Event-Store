@@ -1,7 +1,7 @@
 """
 MCP query-side resources for The Ledger (Req 16.1).
 
-All 6 resources are registered here. Resources read exclusively from projections
+All 7 resources are registered here. Resources read exclusively from projections
 EXCEPT the two named exceptions that load streams directly (Req 16.4):
   - ledger://applications/{id}/audit-trail  → direct AuditLedger stream load
   - ledger://agents/{id}/sessions/{session_id} → direct AgentSession stream load
@@ -425,10 +425,27 @@ async def get_ledger_health() -> str:
     })
 
 
+# ---------------------------------------------------------------------------
+# Resource 7 — ledger://applications/{id}/compliance/{as_of}
+# Point-in-time compliance snapshot — as_of is a required URI path segment.
+# Distinct from Resource 2 where as_of is an optional query parameter.
+# SLO: p99 < 200ms
+# ---------------------------------------------------------------------------
+async def get_application_compliance_at(id: str, as_of: str) -> str:
+    """
+    Return the ComplianceAuditView filtered to recorded_at <= as_of.
+
+    as_of is a required URI path segment (ISO 8601 timestamp).
+    Delegates to get_application_compliance() for the actual query logic.
+    SLO: p99 < 200ms (Req 16.6).
+    """
+    return await get_application_compliance(id, as_of=as_of)
+
+
 def register_resources(mcp):
     mcp.resource("ledger://applications/{id}")(get_application)
     mcp.resource("ledger://applications/{id}/compliance")(get_application_compliance)
-    mcp.resource("ledger://applications/{id}/compliance/{as_of}")(get_application_compliance)
+    mcp.resource("ledger://applications/{id}/compliance/{as_of}")(get_application_compliance_at)
     mcp.resource("ledger://applications/{id}/audit-trail")(get_audit_trail)
     mcp.resource("ledger://agents/{id}/performance")(get_agent_performance)
     mcp.resource("ledger://agents/{id}/sessions/{session_id}")(get_agent_session)
