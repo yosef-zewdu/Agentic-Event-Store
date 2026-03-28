@@ -277,13 +277,14 @@ PYTHONPATH=. uv run fastmcp dev inspector src/mcp/server.py:mcp --with-editable
 | 3 | `record_credit_analysis` | Record a completed credit analysis from an AI agent |
 | 4 | `request_fraud_screening` | Transition application to FRAUD_SCREENING_REQUESTED |
 | 5 | `record_fraud_screening` | Record fraud screening result (validates `fraud_score ∈ [0,1]`) |
-| 6 | `record_compliance_check` | Record compliance rule verdicts |
-| 7 | `generate_decision` | Generate loan decision (confidence < 0.6 → REFER) |
+| 6 | `record_compliance_check` | Record compliance rule verdicts (validates `rule_id` + `passed` on each verdict) |
+| 7 | `generate_decision` | Generate loan decision (confidence < 0.6 → REFER; validates `approved_amount_usd` cap) |
 | 8 | `request_human_review` | Transition application to PENDING_HUMAN_REVIEW |
 | 9 | `record_human_review` | Record loan officer's APPROVE or DECLINE |
 | 10 | `start_agent_session` | Start agent session (Gas Town ordering) |
-| 11 | `run_integrity_check` | Run cryptographic hash-chain check (requires compliance role, rate-limited 1/min) |
+| 11 | `run_integrity_check` | Run cryptographic hash-chain check (requires compliance role + non-empty caller_id, rate-limited 1/min) |
 | 12 | `generate_regulatory_package` | Generate a self-contained regulatory examination package (events + projections + integrity + narrative) up to a given `examination_date` |
+| 13 | `withdraw_application` | Withdraw an application (valid from SUBMITTED, CREDIT_ANALYSIS_REQUESTED, CREDIT_ANALYSIS_COMPLETE) |
 
 ### Available Resources (Queries)
 
@@ -383,7 +384,7 @@ agentic-event-store/
 │   │   └── gas_town.py             # Agent context reconstruction after crash
 │   ├── mcp/
 │   │   ├── server.py               # FastMCP server entry point + lifecycle
-│   │   ├── tools.py                # 12 command tools
+│   │   ├── tools.py                # 13 command tools
 │   │   └── resources.py            # 7 query resources (incl. temporal compliance)
 │   ├── api/
 │   │   ├── app.py                  # FastAPI viewer backend
