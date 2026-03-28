@@ -19,7 +19,7 @@ permanently recorded as an immutable event and cryptographically auditable.
 
 ```bash
 # Clone and enter the project
-git clone <repo-url>
+git clone https://github.com/yosef-zewdu/Agentic-Event-Store.git
 cd agentic-event-store
 
 # Install all dependencies into an isolated .venv
@@ -84,6 +84,17 @@ psql -U postgres -d apexledger -c "
   TRUNCATE TABLE outbox, events, event_streams, projection_checkpoints RESTART IDENTITY CASCADE;
 "
 ```
+---
+
+
+## Generating Seed Data
+
+```bash
+uv run python datagen/generate_all.py
+```
+---
+Produces `data/applicant_profiles.json`, `data/seed_events.jsonl`, and populates
+`documents/COMP-001` through `COMP-080` with PDFs and XLSX financial documents.
 
 ---
 
@@ -272,6 +283,7 @@ PYTHONPATH=. uv run fastmcp dev inspector src/mcp/server.py:mcp --with-editable
 | 9 | `record_human_review` | Record loan officer's APPROVE or DECLINE |
 | 10 | `start_agent_session` | Start agent session (Gas Town ordering) |
 | 11 | `run_integrity_check` | Run cryptographic hash-chain check (requires compliance role, rate-limited 1/min) |
+| 12 | `generate_regulatory_package` | Generate a self-contained regulatory examination package (events + projections + integrity + narrative) up to a given `examination_date` |
 
 ### Available Resources (Queries)
 
@@ -371,7 +383,7 @@ agentic-event-store/
 │   │   └── gas_town.py             # Agent context reconstruction after crash
 │   ├── mcp/
 │   │   ├── server.py               # FastMCP server entry point + lifecycle
-│   │   ├── tools.py                # 11 command tools
+│   │   ├── tools.py                # 12 command tools
 │   │   └── resources.py            # 7 query resources (incl. temporal compliance)
 │   ├── api/
 │   │   ├── app.py                  # FastAPI viewer backend
@@ -406,11 +418,3 @@ agentic-event-store/
 
 ---
 
-## Generating Seed Data
-
-```bash
-uv run python datagen/generate_all.py
-```
-
-Produces `data/applicant_profiles.json`, `data/seed_events.jsonl`, and populates
-`documents/COMP-001` through `COMP-080` with PDFs and XLSX financial documents.
