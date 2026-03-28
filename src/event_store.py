@@ -56,7 +56,17 @@ class EventStore:
         self._pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
-        self._pool = await asyncpg.create_pool(self.db_url, min_size=2, max_size=10)
+        if self._pool is not None:
+            await self._pool.close()
+        self._pool = await asyncpg.create_pool(
+            self.db_url,
+            min_size=2,
+            max_size=10,
+            command_timeout=30.0,   # per-query timeout — prevents stuck connections
+            timeout=5.0,            # connection acquisition timeout
+        )
+        if self._pool is None:
+            raise RuntimeError("Failed to create asyncpg connection pool")
 
     async def close(self) -> None:
         if self._pool:
