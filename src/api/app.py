@@ -21,6 +21,7 @@ from typing import Any
 import asyncpg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from src.event_store import EventStore
@@ -83,6 +84,22 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="The Ledger — Application Viewer", lifespan=_lifespan)
+
+# ---------------------------------------------------------------------------
+# CORS — allow the Vercel frontend origin (Task 28.6)
+# Set FRONTEND_ORIGIN env var to your Vercel URL in production,
+# e.g. https://your-app.vercel.app
+# ---------------------------------------------------------------------------
+_frontend_origin = os.environ.get("FRONTEND_ORIGIN", "")
+_allowed_origins = [_frontend_origin] if _frontend_origin else ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -140,6 +140,24 @@ CREATE TABLE snapshots (
     CONSTRAINT snapshots_pkey PRIMARY KEY (snapshot_id)
 );
 
+-- Async pipeline job queue
+CREATE TABLE IF NOT EXISTS pipeline_jobs (
+    job_id          UUID        NOT NULL DEFAULT gen_random_uuid(),
+    application_id  TEXT        NOT NULL,
+    status          TEXT        NOT NULL DEFAULT 'queued'
+                                CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+    from_agent      TEXT,
+    error_message   TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at      TIMESTAMPTZ,
+    completed_at    TIMESTAMPTZ,
+    CONSTRAINT pipeline_jobs_pkey PRIMARY KEY (job_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_active
+    ON pipeline_jobs (status)
+    WHERE status IN ('queued', 'running');
+
 -- Projection daemon checkpoints
 CREATE TABLE projection_checkpoints (
     projection_name  TEXT        NOT NULL,

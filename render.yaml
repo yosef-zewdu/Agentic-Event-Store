@@ -1,0 +1,44 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Backend_API — FastAPI viewer + MCP server
+  # Uses POOLED Neon connection string (many short-lived request connections)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: ledger-api
+    runtime: python
+    buildCommand: pip install uv && uv sync --frozen --no-dev
+    startCommand: uvicorn src.api.app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        sync: false          # set in Render dashboard — use pooled Neon URL
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: google/gemini-2.0-flash-001
+      - key: REGULATION_VERSION
+        value: 2026-Q1
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PYTHONPATH
+        value: .
+      # CORS — set to your Vercel frontend URL
+      - key: FRONTEND_ORIGIN
+        sync: false          # e.g. https://your-app.vercel.app
+
+  # ---------------------------------------------------------------------------
+  # Worker_Service — ProjectionDaemon + OutboxProcessor
+  # Uses DIRECT (non-pooled) Neon connection string — required for LISTEN/NOTIFY
+  # and long-running transactions that pgBouncer transaction mode would break
+  # ---------------------------------------------------------------------------
+  - type: worker
+    name: ledger-worker
+    runtime: python
+    buildCommand: pip install uv && uv sync --frozen --no-dev
+    startCommand: python -m src.worker.main
+    envVars:
+      - key: DATABASE_URL_DIRECT
+        sync: false          # set in Render dashboard — use direct (non-pooled) Neon URL
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PYTHONPATH
+        value: .
