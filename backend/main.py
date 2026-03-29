@@ -69,7 +69,11 @@ async def _lifespan(app: FastAPI):
     daemon.register(compliance_proj)
     _daemon_task = asyncio.create_task(daemon.run_forever(poll_interval_ms=200))
 
-    # Inject shared state into routes
+    # Wire up deps.py singletons for any code that uses get_store()/get_pool()
+    from backend.deps import set_singletons
+    set_singletons(_store, _pool)
+
+    # Also inject directly into route modules (module-level _store/_pool pattern)
     from backend.routes import applications, documents, pipeline, review
     for module in (applications, documents, pipeline, review):
         module._store = _store
