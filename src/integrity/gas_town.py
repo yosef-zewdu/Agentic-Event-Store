@@ -324,7 +324,7 @@ async def reconstruct_agent_context(
         AgentContext with context_text, last_event_position, pending_work,
         and session_health_status.
     """
-    events = await store.load_stream(f"agent-{agent_id}-{session_id}")
+    events = await store.load_stream(f"session-{session_id}")
 
     if not events:
         return AgentContext(

@@ -12,8 +12,10 @@ here — aggregates never load other aggregates' streams directly.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from src.aggregates.agent_session import AgentSessionAggregate
@@ -38,11 +40,36 @@ from src.models.events import (
     HumanReviewCompleted,
     HumanReviewRequested,
 )
-from src.models.exceptions import DomainError
+from src.models.exceptions import DomainError, OptimisticConcurrencyError, RetryBudgetExhausted
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# OCC retry helper
+# ---------------------------------------------------------------------------
+
+async def with_occ_retry(handler_fn, *args, max_retries: int = 3, **kwargs):
+    """
+    Call handler_fn(*args, **kwargs) with automatic OCC retry and exponential backoff.
+
+    Each retry reloads the aggregate from scratch (because handler_fn does that
+    internally), so the retry is safe and correct.
+
+    Backoff schedule: 50ms, 100ms, 200ms (doubles each attempt).
+    Raises RetryBudgetExhausted after max_retries failed attempts.
+    """
+    last_exc: OptimisticConcurrencyError | None = None
+    for attempt in range(max_retries):
+        try:
+            return await handler_fn(*args, **kwargs)
+        except OptimisticConcurrencyError as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                await asyncio.sleep(0.050 * (2 ** attempt))  # 50ms, 100ms, 200ms
+    raise RetryBudgetExhausted(last_exc.stream_id, max_retries) from last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +80,7 @@ async def handle_submit_application(
     store,
     application_id: str,
     applicant_id: str,
-    requested_amount_usd: float,
+    requested_amount_usd: Decimal,
     loan_purpose: str = "working_capital",
     loan_term_months: int = 12,
     submission_channel: str = "web",
@@ -272,16 +299,29 @@ async def handle_compliance_check(
     rule_verdicts: list of dicts with keys:
         rule_id, rule_version, passed, evidence_hash, failure_reason (optional)
     """
+    # Validate each verdict has required keys before touching the store
+    required_keys = {"rule_id", "passed"}
+    for i, verdict in enumerate(rule_verdicts):
+        missing = required_keys - verdict.keys()
+        if missing:
+            raise DomainError(
+                f"rule_verdicts[{i}] is missing required keys: {sorted(missing)}",
+                context={"index": i, "missing_keys": sorted(missing), "verdict": verdict},
+            )
     agg = await LoanApplicationAggregate.load(store, application_id)
     agg.assert_valid_transition(ApplicationState.COMPLIANCE_CHECK_COMPLETE)
 
-    events: list[Any] = [
-        ComplianceCheckRequested(
+    # Only prepend ComplianceCheckRequested if the compliance stream is new.
+    # If the stream already has events, the caller already staged it — prepending
+    # again would create a duplicate that appears as two initiations in audit queries.
+    compliance_version = await store.stream_version(f"compliance-{application_id}")
+    events: list[Any] = []
+    if compliance_version == -1:
+        events.append(ComplianceCheckRequested(
             application_id=application_id,
             requested_at=_now(),
             regulation_set_version=regulation_set_version,
-        )
-    ]
+        ))
 
     for verdict in rule_verdicts:
         now = _now()
@@ -324,8 +364,7 @@ async def handle_compliance_check(
         completed_at=_now(),
     ))
 
-    # Append to compliance stream
-    compliance_version = await store.stream_version(f"compliance-{application_id}")
+    # Append to compliance stream (compliance_version already fetched above)
     await store.append(
         stream_id=f"compliance-{application_id}",
         events=events,
@@ -366,6 +405,7 @@ async def handle_generate_decision(
     confidence_score: float | None,
     model_versions: dict[str, str],
     contributing_agent_sessions: list[str],
+    approved_amount_usd: float | None = None,
     correlation_id: str | None = None,
 ) -> int:
     """Generate a loan decision (Req 9.2, 9.3).
@@ -377,6 +417,10 @@ async def handle_generate_decision(
 
     # Confidence floor enforcement (Req 8.2)
     agg.assert_confidence_floor(confidence_score, recommendation)
+
+    # Approved amount cap (Req 8.5)
+    if approved_amount_usd is not None and recommendation.upper() == "APPROVE":
+        agg.assert_approved_amount_cap(approved_amount_usd)
 
     # Compliance dependency check at service layer (Req 8.3, 9.3)
     compliance = await ComplianceRecordAggregate.load(store, application_id)
@@ -433,7 +477,7 @@ async def handle_human_review_completed(
     if decision.upper() == "APPROVE":
         final_event: Any = ApplicationApproved(
             application_id=application_id,
-            approved_amount_usd=agg.requested_amount_usd or 0.0,
+            approved_amount_usd=agg.approved_amount_usd or agg.requested_amount_usd or 0.0,
             approved_by=reviewer_id,
             approved_at=_now(),
         )
@@ -509,3 +553,28 @@ async def handle_start_agent_session(
         correlation_id=correlation_id,
     )
     return sid
+
+
+async def handle_withdraw_application(
+    store,
+    application_id: str,
+    reason: str,
+    withdrawn_by: str = "applicant",
+    correlation_id: str | None = None,
+) -> int:
+    """Withdraw a loan application (moves to WITHDRAWN terminal state)."""
+    agg = await LoanApplicationAggregate.load(store, application_id)
+    agg.assert_valid_transition(ApplicationState.WITHDRAWN)
+
+    event = ApplicationWithdrawn(
+        application_id=application_id,
+        reason=reason,
+        withdrawn_at=_now(),
+    )
+    return await store.append(
+        stream_id=f"loan-{application_id}",
+        events=[event],
+        expected_version=agg.version,
+        aggregate_type="loan_application",
+        correlation_id=correlation_id,
+    )

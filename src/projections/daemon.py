@@ -91,6 +91,10 @@ class ProjectionDaemon:
         # (projection_name, event_id_str) -> retry count
         self._retry_counts: dict[tuple[str, str], int] = defaultdict(int)
 
+        # Lock that ensures only one _process_batch runs at a time, whether triggered
+        # by LISTEN/NOTIFY or by the fallback poll loop.
+        self._batch_lock: asyncio.Lock = asyncio.Lock()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -105,19 +109,25 @@ class ProjectionDaemon:
 
     async def run_forever(self, poll_interval_ms: int = 100) -> None:
         """
-        Main polling loop (Req 12.1).
+        Main loop (Req 12.1).
 
-        Polls the events table continuously, routing each new event to subscribed
-        projections.  Default poll interval is 100ms.
+        Uses PostgreSQL LISTEN/NOTIFY for near-zero-latency event delivery.
+        The poll loop continues as a fallback heartbeat — it catches any events
+        missed during a NOTIFY connection blip and keeps the daemon self-healing.
         """
         self._running = True
 
         # Load persisted checkpoints so we resume from the right position (Req 12.6)
         await self._load_checkpoints()
 
+        # Start LISTEN task in the background
+        asyncio.create_task(self._listen_for_notifications())
+
+        # Fallback poll loop — runs at the configured interval regardless of NOTIFY.
+        # When NOTIFY is healthy this mostly finds zero new events (cheap no-op).
         while self._running:
             try:
-                await self._process_batch()
+                await self._run_batch_under_lock()
             except Exception:
                 # Daemon-level errors (e.g. DB connectivity) are logged but never fatal
                 logger.exception("ProjectionDaemon: unexpected error in _process_batch")
@@ -180,22 +190,91 @@ class ProjectionDaemon:
         }
 
     # ------------------------------------------------------------------
+    # LISTEN/NOTIFY (primary delivery path)
+    # ------------------------------------------------------------------
+
+    async def _listen_for_notifications(self) -> None:
+        """
+        Hold a dedicated connection with LISTEN active for the daemon's lifetime.
+
+        Reconnects with exponential backoff if the connection is lost.
+        The fallback poll loop in run_forever() acts as a safety net during reconnection.
+        """
+        backoff = 1.0
+        while self._running:
+            try:
+                async with self._pool.acquire() as conn:
+                    await conn.add_listener("new_events", self._on_notify)
+                    logger.info("ProjectionDaemon: LISTEN/NOTIFY active on 'new_events'")
+                    backoff = 1.0  # reset on successful connection
+                    while self._running:
+                        await asyncio.sleep(1.0)
+                    await conn.remove_listener("new_events", self._on_notify)
+                    return  # clean shutdown
+            except Exception:
+                logger.error(
+                    "ProjectionDaemon: LISTEN/NOTIFY connection lost — "
+                    "retrying in %.1fs (poll loop continues as fallback)",
+                    backoff,
+                    exc_info=True,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)  # cap at 30s
+
+    async def _on_notify(self, conn, pid: int, channel: str, payload: str) -> None:
+        """Called by asyncpg when a NOTIFY new_events arrives."""
+        if not self._batch_lock.locked():
+            asyncio.create_task(self._run_batch_under_lock())
+
+    async def _run_batch_under_lock(self) -> None:
+        """Run one processing cycle under the batch lock (prevents concurrent batches)."""
+        async with self._batch_lock:
+            await self._process_batch()
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _ensure_dlq_table(self) -> None:
+        """Create the dead-letter table for persistently-failing projection events."""
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS projection_failed_events (
+                    projection_name TEXT        NOT NULL,
+                    event_id        UUID        NOT NULL,
+                    event_type      TEXT,
+                    failed_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    error_message   TEXT,
+                    attempts        INT,
+                    PRIMARY KEY (projection_name, event_id)
+                )
+            """)
 
     async def _load_checkpoints(self) -> None:
         """
         Load persisted checkpoints from projection_checkpoints table (Req 12.6).
-        Initialises in-memory state so the daemon resumes from the right position.
+        Also restores DLQ retry counts so previously-exhausted events are skipped
+        immediately on restart rather than being retried from zero.
         """
+        # Ensure DLQ table exists — _load_checkpoints may be called directly in tests
+        await self._ensure_dlq_table()
+
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT projection_name, last_position FROM projection_checkpoints"
             )
             for row in rows:
                 name = row["projection_name"]
-                if name in self._projections or True:  # load all, filter later
+                if name in self._projections:
                     self._checkpoints[name] = row["last_position"]
+
+            # Restore DLQ entries — mark them at max_retries so _dispatch skips them
+            dlq_rows = await conn.fetch(
+                "SELECT projection_name, event_id FROM projection_failed_events"
+            )
+            for row in dlq_rows:
+                key = (row["projection_name"], str(row["event_id"]))
+                self._retry_counts[key] = self._max_retries
 
     async def _process_batch(self) -> None:
         """
@@ -242,6 +321,18 @@ class ProjectionDaemon:
         try:
             async with self._pool.acquire() as conn:
                 async with conn.transaction():
+                    # Distributed coordination (Req 0.6): acquire a projection-specific
+                    # advisory lock so only one daemon node processes this projection
+                    # at a time.  pg_try_advisory_xact_lock is transaction-scoped —
+                    # it releases automatically at transaction end, no cleanup needed.
+                    lock_id = hash(proj.name) & 0x7FFFFFFF
+                    acquired = await conn.fetchval(
+                        "SELECT pg_try_advisory_xact_lock($1)", lock_id
+                    )
+                    if not acquired:
+                        # Another node holds the lock — skip; it will advance the checkpoint
+                        return
+
                     # Projection writes using the transactional connection
                     await proj.handle(event, conn)
 
@@ -279,14 +370,31 @@ class ProjectionDaemon:
             )
 
             if attempts >= self._max_retries:
-                # Retry exhausted — skip this event and advance checkpoint (Req 12.2)
+                # Retry exhausted — write to DLQ, skip, and advance checkpoint (Req 12.2)
                 logger.warning(
                     "ProjectionDaemon: skipping event_id=%s for projection=%s "
-                    "after %d failed attempts",
+                    "after %d failed attempts — writing to DLQ",
                     event.event_id,
                     proj.name,
                     attempts,
                 )
+                async with self._pool.acquire() as dlq_conn:
+                    await dlq_conn.execute(
+                        """
+                        INSERT INTO projection_failed_events
+                            (projection_name, event_id, event_type, error_message, attempts)
+                        VALUES ($1, $2, $3, $4, $5)
+                        ON CONFLICT (projection_name, event_id) DO UPDATE SET
+                            error_message = EXCLUDED.error_message,
+                            attempts      = EXCLUDED.attempts,
+                            failed_at     = NOW()
+                        """,
+                        proj.name,
+                        event.event_id,
+                        event.event_type,
+                        str(exc),
+                        attempts,
+                    )
                 await self._advance_checkpoint(proj.name, event.global_position)
                 self._retry_counts.pop(retry_key, None)
             # else: will be retried on the next poll cycle

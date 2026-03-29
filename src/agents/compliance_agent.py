@@ -103,6 +103,7 @@ class ComplianceAgent(BaseApexAgent):
         else:
             ev = self._rule_passed("REG-001", "BSA Anti-Money Laundering", "No active AML flags")
         await self._append_stream(f"compliance-{app_id}", ev)
+        await asyncio.sleep(2)
         results = state.get("rules_results", []) + [{"rule": "REG-001", "passed": not aml_active}]
         await self._record_node_execution("check_reg001", ["company_profile"],
                                           ["rules_results"], int((time.time() - t) * 1000))
@@ -121,6 +122,7 @@ class ComplianceAgent(BaseApexAgent):
             ev = self._rule_passed("REG-002", "OFAC Sanctions Screening", "No sanctions flags")
             hard_block = state.get("hard_block", False)
         await self._append_stream(f"compliance-{app_id}", ev)
+        await asyncio.sleep(2)
         results = state.get("rules_results", []) + [{"rule": "REG-002", "passed": not sanctions_active}]
         await self._record_node_execution("check_reg002", ["company_profile"],
                                           ["rules_results", "hard_block"],
@@ -141,6 +143,7 @@ class ComplianceAgent(BaseApexAgent):
                                    f"Jurisdiction {jurisdiction} is eligible")
             hard_block = state.get("hard_block", False)
         await self._append_stream(f"compliance-{app_id}", ev)
+        await asyncio.sleep(2)
         results = state.get("rules_results", []) + [{"rule": "REG-003", "passed": jurisdiction != "MT"}]
         await self._record_node_execution("check_reg003", ["company_profile"],
                                           ["rules_results", "hard_block"],
@@ -163,6 +166,7 @@ class ComplianceAgent(BaseApexAgent):
             ev = self._rule_passed("REG-004", "Legal Entity Loan Limit",
                                    f"Legal type {legal_type} within limits")
         await self._append_stream(f"compliance-{app_id}", ev)
+        await asyncio.sleep(2)
         results = state.get("rules_results", []) + [{"rule": "REG-004", "passed": not failed}]
         await self._record_node_execution("check_reg004", ["company_profile", "requested_amount_usd"],
                                           ["rules_results"], int((time.time() - t) * 1000))
@@ -183,6 +187,7 @@ class ComplianceAgent(BaseApexAgent):
                                    f"Founded {founded} - meets 3-year requirement")
             hard_block = state.get("hard_block", False)
         await self._append_stream(f"compliance-{app_id}", ev)
+        await asyncio.sleep(2)
         results = state.get("rules_results", []) + [{"rule": "REG-005", "passed": int(founded) <= 2022}]
         await self._record_node_execution("check_reg005", ["company_profile"],
                                           ["rules_results", "hard_block"],
@@ -196,6 +201,7 @@ class ComplianceAgent(BaseApexAgent):
                               "CRA_CONSIDERATION",
                               "Application noted for CRA reporting purposes")
         await self._append_stream(f"compliance-{app_id}", ev)
+        await asyncio.sleep(2)
         results = state.get("rules_results", []) + [{"rule": "REG-006", "passed": True, "noted": True}]
         await self._record_node_execution("check_reg006", ["company_profile"],
                                           ["rules_results"], int((time.time() - t) * 1000))

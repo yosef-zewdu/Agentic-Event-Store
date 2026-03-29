@@ -133,7 +133,16 @@
 <div class="search-bar">
   <input id="appInput" type="text" placeholder="Enter application ID (e.g. app-001)" value="" />
   <button onclick="loadApplication()">Load</button>
+  <button onclick="showOccDemo()" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 20px;color:var(--yellow);font-size:14px;font-weight:600;cursor:pointer;margin-left:8px">⚡ OCC Demo</button>
+  <button onclick="showUpcastingDemo()" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 20px;color:#a5b4fc;font-size:14px;font-weight:600;cursor:pointer;margin-left:8px">🔬 Upcasting</button>
+  <button onclick="showGasTownDemo()" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 20px;color:#22c55e;font-size:14px;font-weight:600;cursor:pointer;margin-left:8px">💥 Gas Town</button>
+  <button onclick="showWhatIfDemo()" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 20px;color:#f59e0b;font-size:14px;font-weight:600;cursor:pointer;margin-left:8px">🔀 What-If</button>
 </div>
+
+<div id="occ-demo-panel" style="display:none;padding:20px 24px 40px"></div>
+<div id="upcasting-demo-panel" style="display:none;padding:20px 24px 40px"></div>
+<div id="gas-town-demo-panel" style="display:none;padding:20px 24px 40px"></div>
+<div id="what-if-demo-panel" style="display:none;padding:20px 24px 40px"></div>
 
 <div class="container" id="main"></div>
 
@@ -192,6 +201,8 @@ async function loadApplication() {
   const appId = document.getElementById('appInput').value.trim();
   if (!appId) return;
   _appId = appId;
+  // Hide OCC panel if open
+  document.getElementById('occ-demo-panel').style.display = 'none';
   const main = document.getElementById('main');
   main.innerHTML = '<div class="loading">Loading…</div>';
 
@@ -218,6 +229,7 @@ function renderPage(appId, summary, events) {
       <div class="tab" onclick="switchTab('agents')">Agent Sessions</div>
       <div class="tab" onclick="switchTab('token-usage')">Token Usage</div>
       <div class="tab" onclick="switchTab('integrity')">Integrity</div>
+      <div class="tab" onclick="switchTab('audit-trail')">Audit Trail</div>
       <div class="tab" onclick="switchTab('health')">Ledger Health</div>
     </div>
     <div id="tab-events" class="tab-panel active">${renderTimeline(events)}</div>
@@ -227,6 +239,7 @@ function renderPage(appId, summary, events) {
     <div id="tab-agents" class="tab-panel"><div class="loading" id="agents-loading">Loading agent sessions…</div></div>
     <div id="tab-token-usage" class="tab-panel"><div class="loading" id="token-usage-loading">Loading token usage…</div></div>
     <div id="tab-integrity" class="tab-panel"><div class="loading" id="integrity-loading">Loading integrity…</div></div>
+    <div id="tab-audit-trail" class="tab-panel"><div class="loading" id="audit-trail-loading">Loading audit trail…</div></div>
     <div id="tab-health" class="tab-panel"><div class="loading" id="health-loading">Loading health…</div></div>
   `;
 
@@ -237,11 +250,12 @@ function renderPage(appId, summary, events) {
   loadAllEvents(appId);
   loadTokenUsage(appId);
   loadIntegrity(appId);
+  loadAuditTrail(appId);
   loadHealth();
 }
 
 function switchTab(name) {
-  const names = ['events','agent-streams','all-events','compliance','agents','token-usage','integrity','health'];
+  const names = ['events','agent-streams','all-events','compliance','agents','token-usage','integrity','audit-trail','health'];
   document.querySelectorAll('.tab').forEach((t, i) => {
     t.classList.toggle('active', names[i] === name);
   });
@@ -481,31 +495,51 @@ function renderTokenUsage(data, pricing) {
 }
 
 async function loadCompliance(appId, asOf) {
+  const resultsEl = document.getElementById('compliance-results');
+  if (resultsEl) {
+    resultsEl.innerHTML = '<div class="loading">Loading…</div>';
+  } else {
+    // First load — render the full tab with controls + empty results container
+    document.getElementById('tab-compliance').innerHTML =
+      renderComplianceControls(appId) +
+      '<div id="compliance-results"><div class="loading">Loading…</div></div>';
+  }
   try {
     const url = asOf
       ? `${BASE}/applications/${appId}/compliance?as_of=${encodeURIComponent(asOf)}`
       : `${BASE}/applications/${appId}/compliance`;
     const data = await fetchJSON(url);
-    // as_of response wraps records; current state returns array directly
     const rows = Array.isArray(data) ? data : (data.records || []);
     const asOfLabel = data.as_of
-      ? `<div style="margin-bottom:12px;font-size:12px;color:var(--yellow)">⏱ Point-in-time view as of ${fmtDt(data.as_of)}</div>`
+      ? `<div style="margin-bottom:12px;font-size:12px;color:var(--yellow)">⏱ Point-in-time view as of ${fmtDt(data.as_of)} — ${rows.length} record(s)</div>`
       : '';
-    document.getElementById('tab-compliance').innerHTML =
-      renderComplianceControls(appId) + asOfLabel + renderComplianceTable(rows);
+    const hint = rows.length
+      ? `<div style="font-size:11px;color:var(--muted);margin-bottom:12px">
+           Events span: ${fmtDt(rows[0].recorded_at)} → ${fmtDt(rows[rows.length-1].recorded_at)}
+         </div>`
+      : '';
+    document.getElementById('compliance-results').innerHTML =
+      hint + asOfLabel + renderComplianceTable(rows);
   } catch (e) {
-    document.getElementById('tab-compliance').innerHTML =
-      renderComplianceControls(appId) + `<div class="error-box">${e.message}</div>`;
+    document.getElementById('compliance-results').innerHTML =
+      `<div class="error-box">${e.message}</div>`;
   }
 }
 
 function renderComplianceControls(appId) {
   return `
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
       <input id="asOfInput" type="datetime-local" step="1"
         style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
                padding:8px 12px;color:var(--text);font-size:13px;outline:none" />
-      <button onclick="loadCompliance('${appId}', document.getElementById('asOfInput').value || undefined)"
+      <button onclick="(() => {
+          const v = document.getElementById('asOfInput').value;
+          if (!v) return;
+          // Convert local datetime-local value to UTC ISO string for the API
+          const localDate = new Date(v);
+          const utcIso = localDate.toISOString();
+          loadCompliance('${appId}', utcIso);
+        })()"
         style="background:var(--accent);border:none;border-radius:var(--radius);padding:8px 16px;
                color:#fff;font-size:13px;font-weight:600;cursor:pointer">
         Query as of…
@@ -606,6 +640,448 @@ async function runIntegrityCheck(appId) {
     await loadIntegrity(appId);
   } catch (e) {
     document.getElementById('tab-integrity').innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+async function loadAuditTrail(appId, fromPos, toPos) {
+  const params = new URLSearchParams();
+  if (fromPos != null && fromPos !== '') params.set('from_pos', fromPos);
+  if (toPos != null && toPos !== '') params.set('to_pos', toPos);
+  const qs = params.toString() ? '?' + params.toString() : '';
+  try {
+    const data = await fetchJSON(`${BASE}/applications/${appId}/audit-trail${qs}`);
+    const events = data.events || [];
+    const rangeLabel = (fromPos != null && fromPos !== '') || (toPos != null && toPos !== '')
+      ? `<span style="color:var(--yellow);font-size:12px">⏱ Showing positions ${fromPos || 0}–${toPos ?? 'end'}</span>`
+      : '';
+    document.getElementById('tab-audit-trail').innerHTML = `
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+        <input id="auditFromPos" type="number" min="0" placeholder="From position"
+          value="${fromPos ?? ''}"
+          style="width:140px;background:var(--surface);border:1px solid var(--border);
+                 border-radius:var(--radius);padding:8px 12px;color:var(--text);font-size:13px;outline:none" />
+        <input id="auditToPos" type="number" min="0" placeholder="To position"
+          value="${toPos ?? ''}"
+          style="width:140px;background:var(--surface);border:1px solid var(--border);
+                 border-radius:var(--radius);padding:8px 12px;color:var(--text);font-size:13px;outline:none" />
+        <button onclick="loadAuditTrail('${appId}', document.getElementById('auditFromPos').value || null, document.getElementById('auditToPos').value || null)"
+          style="background:var(--accent);border:none;border-radius:var(--radius);padding:8px 16px;
+                 color:#fff;font-size:13px;font-weight:600;cursor:pointer">
+          Filter
+        </button>
+        <button onclick="loadAuditTrail('${appId}')"
+          style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+                 padding:8px 16px;color:var(--text);font-size:13px;cursor:pointer">
+          All
+        </button>
+        <span style="color:var(--muted);font-size:12px;margin-left:4px">${data.event_count} event${data.event_count !== 1 ? 's' : ''} · stream: <code style="color:#a5b4fc">${data.stream_id}</code></span>
+        ${rangeLabel}
+      </div>
+      ${events.length === 0
+        ? '<p style="color:var(--muted)">No audit trail events found.</p>'
+        : `<div class="timeline">${events.map(e => `
+            <div class="tl-item">
+              <div class="tl-dot" style="background:${eventDotColor(e.event_type)}"></div>
+              <div class="tl-card">
+                <div class="tl-header">
+                  <span class="tl-type">${e.event_type}</span>
+                  <span class="tl-time">${fmtDt(e.recorded_at)}</span>
+                </div>
+                <div class="tl-pos">pos ${e.stream_position}</div>
+                <div class="tl-payload">
+                  <details>
+                    <summary>Payload</summary>
+                    <pre>${JSON.stringify(e.payload, null, 2)}</pre>
+                  </details>
+                </div>
+              </div>
+            </div>`).join('')}</div>`
+      }`;
+  } catch (e) {
+    document.getElementById('tab-audit-trail').innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+function showOccDemo() {
+  const panel = document.getElementById('occ-demo-panel');
+  const isVisible = panel.style.display !== 'none';
+  if (isVisible) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+  panel.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;max-width:800px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div>
+          <div style="font-size:18px;font-weight:700;color:var(--yellow)">⚡ Step 2 — Concurrency Under Pressure</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px">Two agents race to append to the same stream. Exactly one wins.</div>
+        </div>
+        <button onclick="document.getElementById('occ-demo-panel').style.display='none'"
+          style="background:none;border:1px solid var(--border);border-radius:var(--radius);padding:6px 12px;color:var(--muted);cursor:pointer">✕ Close</button>
+      </div>
+      <button id="occRunBtn" onclick="runOccDemo()"
+        style="background:var(--yellow);border:none;border-radius:var(--radius);padding:10px 24px;
+               color:#000;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:20px">
+        ▶ Run Collision
+      </button>
+      <div id="occ-result"></div>
+    </div>`;
+}
+
+async function runOccDemo() {
+  document.getElementById('occRunBtn').disabled = true;
+  document.getElementById('occRunBtn').textContent = 'Running…';
+  document.getElementById('occ-result').innerHTML = '<div class="loading">Firing two agents simultaneously…</div>';
+  try {
+    const r = await fetch('/demo/occ-collision', { method: 'POST' });
+    const d = await r.json();
+    const winnerColor = '#22c55e';
+    const loserColor  = '#ef4444';
+    const retryColor  = '#6c63ff';
+
+    const agentRow = (label, data) => {
+      if (!data) return '';
+      const isWin = data.status === 'success';
+      const color = isWin ? winnerColor : loserColor;
+      const icon  = isWin ? '✓ WON' : '✗ OCC ERROR';
+      return `
+        <div style="background:var(--bg);border:1px solid ${color}33;border-radius:var(--radius);padding:12px 16px;margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="font-weight:700;font-size:15px">Agent ${label}</span>
+            <span style="color:${color};font-weight:700;font-size:13px">${icon}</span>
+          </div>
+          ${isWin
+            ? `<div style="font-size:12px;color:var(--muted);margin-top:4px">Appended at version ${data.appended_at_version}</div>`
+            : `<div style="font-size:12px;color:var(--muted);margin-top:4px">
+                expected_version=${data.expected_version} · actual_version=${data.actual_version}<br>
+                suggested_action: <code style="color:#a5b4fc">${data.suggested_action}</code>
+               </div>`
+          }
+        </div>`;
+    };
+
+    const retryHtml = d.retry ? `
+      <div style="background:var(--bg);border:1px solid ${retryColor}33;border-radius:var(--radius);padding:12px 16px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-weight:700">Agent ${d.retry.agent} — RETRY</span>
+          <span style="color:${retryColor};font-weight:700;font-size:13px">↺ SUCCEEDED</span>
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin-top:4px">
+          Reloaded stream version, retried at version ${d.retry.retried_at_version}
+        </div>
+      </div>` : '';
+
+    document.getElementById('occ-result').innerHTML = `
+      <div style="font-size:12px;color:var(--muted);margin-bottom:12px;font-family:monospace">
+        Stream: ${d.stream} &nbsp;·&nbsp; initial_version=${d.initial_version} &nbsp;·&nbsp; final_version=${d.final_version}
+      </div>
+      ${agentRow('A', d.agent_A)}
+      ${agentRow('B', d.agent_B)}
+      ${retryHtml}
+      <div style="margin-top:16px;padding:12px;background:var(--bg);border-radius:var(--radius);font-size:12px;color:var(--muted)">
+        <strong style="color:var(--text)">Result:</strong>
+        Exactly <strong style="color:${winnerColor}">1 event appended</strong> (version ${d.initial_version} → ${d.initial_version + 1}).
+        Agent ${d.loser} received <code style="color:#ef4444">OptimisticConcurrencyError</code>,
+        reloaded the stream, and retried successfully at version ${d.retry?.retried_at_version ?? '—'}.
+      </div>`;
+  } catch(e) {
+    document.getElementById('occ-result').innerHTML = `<div class="error-box">${e.message}</div>`;
+  } finally {
+    document.getElementById('occRunBtn').disabled = false;
+    document.getElementById('occRunBtn').textContent = '▶ Run Collision';
+  }
+}
+
+function showUpcastingDemo() {
+  const panel = document.getElementById('upcasting-demo-panel');
+  const isVisible = panel.style.display !== 'none';
+  if (isVisible) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  const appId = document.getElementById('appInput').value.trim() || '';
+  panel.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;max-width:900px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div>
+          <div style="font-size:18px;font-weight:700;color:#a5b4fc">🔬 Step 4 — Upcasting & Immutability</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px">Load a v1 event through the store — arrives as v2. Raw DB row is unchanged.</div>
+        </div>
+        <button onclick="document.getElementById('upcasting-demo-panel').style.display='none'"
+          style="background:none;border:1px solid var(--border);border-radius:var(--radius);padding:6px 12px;color:var(--muted);cursor:pointer">✕ Close</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:20px">
+        <input id="upcastAppId" type="text" value="${appId}" placeholder="Application ID (e.g. APEX-0012)"
+          style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+                 padding:8px 12px;color:var(--text);font-size:13px;outline:none" />
+        <button onclick="runUpcastingDemo(document.getElementById('upcastAppId').value)"
+          style="background:#a5b4fc;border:none;border-radius:var(--radius);padding:8px 20px;
+                 color:#000;font-size:13px;font-weight:700;cursor:pointer">
+          ▶ Load Event
+        </button>
+      </div>
+      <div id="upcasting-result"></div>
+    </div>`;
+}
+
+async function runUpcastingDemo(appId) {
+  if (!appId) return;
+  document.getElementById('upcasting-result').innerHTML = '<div class="loading">Loading event…</div>';
+  try {
+    const d = await fetchJSON(`${BASE}/demo/upcasting/${appId}`);
+
+    const fieldRow = (key, rawVal, upcastedVal, isAdded) => {
+      const added = isAdded
+        ? `<span style="background:#1a2744;color:#a5b4fc;font-size:10px;padding:1px 6px;border-radius:4px;margin-left:6px">ADDED BY UPCASTER</span>`
+        : '';
+      const valStr = v => v === null ? '<span style="color:var(--muted)">null</span>'
+                        : v === undefined ? '<span style="color:var(--muted)">—</span>'
+                        : `<code style="color:#a5b4fc">${JSON.stringify(v)}</code>`;
+      return `<tr>
+        <td style="padding:6px 10px;font-family:monospace;font-size:12px">${key}${added}</td>
+        <td style="padding:6px 10px;font-size:12px">${isAdded ? '<span style="color:var(--muted)">not present</span>' : valStr(rawVal)}</td>
+        <td style="padding:6px 10px;font-size:12px">${valStr(upcastedVal)}</td>
+      </tr>`;
+    };
+
+    const addedKeys = Object.keys(d.added_by_upcasting);
+    const sharedKeys = Object.keys(d.raw_payload);
+
+    const rows = [
+      ...sharedKeys.map(k => fieldRow(k, d.raw_payload[k], d.upcasted_payload[k], false)),
+      ...addedKeys.map(k => fieldRow(k, undefined, d.added_by_upcasting[k], true)),
+    ].join('');
+
+    document.getElementById('upcasting-result').innerHTML = `
+      <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 16px;font-size:12px">
+          <div style="color:var(--muted);margin-bottom:2px">Event ID</div>
+          <code style="color:#a5b4fc;font-size:11px">${d.event_id}</code>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 16px;font-size:12px">
+          <div style="color:var(--muted);margin-bottom:2px">Stored version</div>
+          <strong style="color:var(--red)">v${d.raw_version}</strong>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 16px;font-size:12px">
+          <div style="color:var(--muted);margin-bottom:2px">Loaded version</div>
+          <strong style="color:var(--green)">v${d.upcasted_version}</strong>
+        </div>
+        <div style="background:var(--bg);border:1px solid #22c55e33;border-radius:var(--radius);padding:10px 16px;font-size:12px">
+          <div style="color:var(--muted);margin-bottom:2px">DB row unchanged</div>
+          <strong style="color:var(--green)">✓ IMMUTABLE</strong>
+        </div>
+        <div style="background:var(--bg);border:1px solid #a5b4fc33;border-radius:var(--radius);padding:10px 16px;font-size:12px">
+          <div style="color:var(--muted);margin-bottom:2px">Fields added at read time</div>
+          <strong style="color:#a5b4fc">${addedKeys.length} field${addedKeys.length !== 1 ? 's' : ''}</strong>
+        </div>
+      </div>
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border)">
+            <th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--muted);text-transform:uppercase">Field</th>
+            <th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--red);text-transform:uppercase">Raw DB (v${d.raw_version})</th>
+            <th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--green);text-transform:uppercase">Loaded (v${d.upcasted_version})</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch(e) {
+    document.getElementById('upcasting-result').innerHTML = `<div class="error-box">${e.message}</div>`;
+  }
+}
+
+function showGasTownDemo() {
+  const panel = document.getElementById('gas-town-demo-panel');
+  const isVisible = panel.style.display !== 'none';
+  if (isVisible) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  panel.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;max-width:900px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div>
+          <div style="font-size:18px;font-weight:700;color:#22c55e">💥 Step 5 — Gas Town Recovery</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px">
+            Start a session, append events, simulate a crash. Reconstruct context from the event store.
+          </div>
+        </div>
+        <button onclick="document.getElementById('gas-town-demo-panel').style.display='none'"
+          style="background:none;border:1px solid var(--border);border-radius:var(--radius);padding:6px 12px;color:var(--muted);cursor:pointer">✕ Close</button>
+      </div>
+      <button id="gasTownRunBtn" onclick="runGasTownDemo()"
+        style="background:#22c55e;border:none;border-radius:var(--radius);padding:10px 24px;
+               color:#000;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:20px">
+        ▶ Simulate Crash &amp; Recover
+      </button>
+      <div id="gas-town-result"></div>
+    </div>`;
+}
+
+async function runGasTownDemo() {
+  document.getElementById('gasTownRunBtn').disabled = true;
+  document.getElementById('gasTownRunBtn').textContent = 'Running…';
+  document.getElementById('gas-town-result').innerHTML = '<div class="loading">Simulating crash and reconstructing context…</div>';
+  try {
+    const d = await fetch('/demo/gas-town-recovery', { method: 'POST' }).then(r => r.json());
+    const r = d.reconstruction;
+    const healthColor = r.session_health_status === 'NEEDS_RECONCILIATION' ? '#f59e0b' : '#22c55e';
+    const healthIcon  = r.session_health_status === 'NEEDS_RECONCILIATION' ? '⚠' : '✓';
+
+    const pendingHtml = r.pending_work.length ? r.pending_work.map(pw => `
+      <div style="background:var(--bg);border:1px solid #f59e0b33;border-radius:4px;padding:8px 12px;margin-top:6px;font-size:12px">
+        <span style="color:#f59e0b">⚠ Partial Decision</span>
+        &nbsp;·&nbsp; <code>${pw.request_event_type}</code> at pos ${pw.stream_position}
+        &nbsp;→&nbsp; <code style="color:var(--muted)">${pw.completion_event_type}</code> (missing)
+      </div>`).join('') : '<div style="color:var(--green);font-size:12px;margin-top:6px">No partial decisions</div>';
+
+    document.getElementById('gas-town-result').innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:16px">
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Session</div>
+          <code style="font-size:11px;color:#a5b4fc">${d.session_id}</code>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Events Written</div>
+          <strong>${d.events_written}</strong>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--red)33;border-radius:var(--radius);padding:12px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Crash At</div>
+          <strong style="color:var(--red)">${d.crash_at_node}</strong>
+        </div>
+        <div style="background:var(--bg);border:1px solid ${healthColor}33;border-radius:var(--radius);padding:12px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Health Status</div>
+          <strong style="color:${healthColor}">${healthIcon} ${r.session_health_status}</strong>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Last Position</div>
+          <strong>${r.last_event_position}</strong>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Verbatim / Summarised</div>
+          <strong>${r.verbatim_event_count}</strong> <span style="color:var(--muted)">/ ${r.summarised_event_count}</span>
+        </div>
+      </div>
+
+      <div style="margin-bottom:12px">
+        <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Pending Work (unmatched request/completion pairs)</div>
+        ${pendingHtml}
+      </div>
+
+      <div>
+        <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Reconstructed Context (preview)</div>
+        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px;font-size:11px;color:#a5b4fc;overflow-x:auto;white-space:pre-wrap">${d.reconstruction.context_text_preview}</pre>
+      </div>`;
+  } catch(e) {
+    document.getElementById('gas-town-result').innerHTML = `<div class="error-box">${e.message}</div>`;
+  } finally {
+    document.getElementById('gasTownRunBtn').disabled = false;
+    document.getElementById('gasTownRunBtn').textContent = '▶ Simulate Crash & Recover';
+  }
+}
+
+function showWhatIfDemo() {
+  const panel = document.getElementById('what-if-demo-panel');
+  const isVisible = panel.style.display !== 'none';
+  if (isVisible) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  const appId = document.getElementById('appInput').value.trim() || '';
+  panel.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;max-width:900px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div>
+          <div style="font-size:18px;font-weight:700;color:#f59e0b">🔀 Step 6 — What-If Counterfactual</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px">
+            Substitute HIGH risk tier for MEDIUM. Show cascading effect on final decision. DB never written.
+          </div>
+        </div>
+        <button onclick="document.getElementById('what-if-demo-panel').style.display='none'"
+          style="background:none;border:1px solid var(--border);border-radius:var(--radius);padding:6px 12px;color:var(--muted);cursor:pointer">✕ Close</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:20px">
+        <input id="whatIfAppId" type="text" value="${appId}" placeholder="Application ID (e.g. APEX-0012)"
+          style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+                 padding:8px 12px;color:var(--text);font-size:13px;outline:none" />
+        <button onclick="runWhatIfDemo(document.getElementById('whatIfAppId').value)"
+          style="background:#f59e0b;border:none;border-radius:var(--radius);padding:8px 20px;
+                 color:#000;font-size:13px;font-weight:700;cursor:pointer">
+          ▶ Run Scenario
+        </button>
+      </div>
+      <div id="what-if-result"></div>
+    </div>`;
+}
+
+async function runWhatIfDemo(appId) {
+  if (!appId) return;
+  document.getElementById('what-if-result').innerHTML = '<div class="loading">Running counterfactual analysis…</div>';
+  try {
+    const d = await fetchJSON(`${BASE}/demo/what-if/${appId}`);
+    const r = d.real;
+    const cf = d.counterfactual;
+
+    const stateChanged = r.final_state !== cf.final_state;
+    const recChanged   = r.recommendation !== cf.recommendation;
+    const limitDiff    = cf.recommended_limit_usd - r.recommended_limit_usd;
+
+    const compareRow = (label, realVal, cfVal, fmt) => {
+      const changed = realVal !== cfVal;
+      const cfStyle = changed ? 'color:var(--red);font-weight:700' : 'color:var(--muted)';
+      return `<tr>
+        <td style="padding:8px 12px;font-size:13px;color:var(--muted)">${label}</td>
+        <td style="padding:8px 12px;font-size:13px;color:var(--green)">${fmt ? fmt(realVal) : realVal}</td>
+        <td style="padding:8px 12px;font-size:13px;${cfStyle}">${fmt ? fmt(cfVal) : cfVal}${changed ? ' ←' : ''}</td>
+      </tr>`;
+    };
+
+    const fmtMoney = v => v != null ? '$' + Number(v).toLocaleString(undefined, {maximumFractionDigits:0}) : '—';
+
+    const rulesHtml = d.business_rules_triggered.map(rule => `
+      <div style="background:var(--bg);border:1px solid #f59e0b33;border-radius:4px;padding:10px 14px;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <code style="color:#f59e0b;font-size:12px">${rule.rule}</code>
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin-top:3px">${rule.description}</div>
+        <div style="font-size:12px;color:var(--text);margin-top:2px">→ ${rule.effect}</div>
+      </div>`).join('');
+
+    document.getElementById('what-if-result').innerHTML = `
+      <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;font-size:12px">
+          <div style="color:var(--muted);margin-bottom:2px">Branch Point</div>
+          <code style="color:#a5b4fc">CreditAnalysisCompleted</code>
+          <div style="color:var(--muted);font-size:11px;margin-top:2px">${d.pre_branch_events} events before</div>
+        </div>
+        <div style="background:var(--bg);border:1px solid #22c55e33;border-radius:var(--radius);padding:10px 14px;font-size:12px">
+          <div style="color:var(--muted);margin-bottom:2px">DB Written</div>
+          <strong style="color:var(--green)">✓ NEVER — in-memory only</strong>
+        </div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;font-size:12px">
+          <div style="color:var(--muted);margin-bottom:2px">Divergence Events</div>
+          <strong>${d.divergence_event_count}</strong>
+        </div>
+      </div>
+
+      <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border)">
+            <th style="text-align:left;padding:8px 12px;font-size:11px;color:var(--muted);text-transform:uppercase">Field</th>
+            <th style="text-align:left;padding:8px 12px;font-size:11px;color:var(--green);text-transform:uppercase">Real</th>
+            <th style="text-align:left;padding:8px 12px;font-size:11px;color:var(--red);text-transform:uppercase">Counterfactual (HIGH)</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${compareRow('risk_tier', r.risk_tier, cf.risk_tier)}
+          ${compareRow('recommended_limit_usd', r.recommended_limit_usd, cf.recommended_limit_usd, fmtMoney)}
+          ${compareRow('confidence', r.confidence, cf.confidence, v => Number(v).toFixed(2))}
+          ${compareRow('final_state', r.final_state, cf.final_state)}
+          ${compareRow('recommendation', r.recommendation || '—', cf.recommendation || '—')}
+        </tbody>
+      </table>
+
+      <div style="margin-bottom:8px;font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">
+        Business Rules Triggered
+      </div>
+      ${rulesHtml}`;
+  } catch(e) {
+    document.getElementById('what-if-result').innerHTML = `<div class="error-box">${e.message}</div>`;
   }
 }
 

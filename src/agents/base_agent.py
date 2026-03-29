@@ -9,7 +9,7 @@ from datetime import datetime
 from uuid import uuid4
 from openai import AsyncOpenAI
 from langgraph.graph import StateGraph, END
-
+import openai
 from src.llm_factory import compute_cost
 
 LANGGRAPH_VERSION = "1.0.0"
@@ -56,14 +56,23 @@ class BaseApexAgent(ABC):
         if resume_session_id:
             self.session_id = resume_session_id
             self._session_stream = f"session-{resume_session_id}"
-            # Load existing session to get t0 and seq
             events = await self.store.load_stream(self._session_stream)
-            started = next((e for e in events if e.get("event_type") == "AgentSessionStarted"), None)
-            if started:
-                self._t0 = time.time()  # Reset for resume
-                self._seq = len([e for e in events if e.get("event_type") == "AgentNodeExecuted"])
-            else:
+            if not events:
                 raise ValueError(f"Session {resume_session_id} not found")
+            # Check session is in a resumable state — not already completed successfully
+            terminal_types = {"AgentSessionCompleted"}
+            terminal = next((e for e in events if e.event_type in terminal_types), None)
+            if terminal:
+                raise ValueError(
+                    f"Session {resume_session_id} already completed successfully "
+                    f"and cannot be resumed"
+                )
+            started = next((e for e in events if e.event_type == "AgentSessionStarted"), None)
+            if started:
+                self._t0 = time.time()
+                self._seq = len([e for e in events if e.event_type == "AgentNodeExecuted"])
+            else:
+                raise ValueError(f"Session {resume_session_id} has no AgentSessionStarted event")
         else:
             self.session_id = f"sess-{self.agent_type[:3]}-{uuid4().hex[:8]}"
             self._session_stream = f"session-{self.session_id}"
@@ -77,8 +86,14 @@ class BaseApexAgent(ABC):
         if not resume_session_id:
             await self._start_session(application_id)
         try:
-            result = await self._graph.ainvoke(self._initial_state(application_id))
+            result = await asyncio.wait_for(
+                self._graph.ainvoke(self._initial_state(application_id)),
+                timeout=300.0,  # 5-minute hard cap per agent run
+            )
             await self._complete_session(result)
+        except asyncio.TimeoutError:
+            await self._fail_session("TimeoutError", "Agent run exceeded 300s timeout")
+            raise
         except Exception as e:
             await self._fail_session(type(e).__name__, str(e))
             raise
@@ -206,15 +221,31 @@ class BaseApexAgent(ABC):
                 raise
 
     async def _call_llm(self, system, user, max_tokens=1024):
-        resp = await self.client.chat.completions.create(
-            model=self.model, max_tokens=max_tokens,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}])
-        text = resp.choices[0].message.content or ""
-        tok_in = resp.usage.prompt_tokens if resp.usage else 0
-        tok_out = resp.usage.completion_tokens if resp.usage else 0
-        cost = _compute_cost(self.model, tok_in, tok_out)
-        return text, tok_in, tok_out, cost
+        
+        last_exc = None
+        for attempt in range(3):
+            try:
+                resp = await asyncio.wait_for(
+                    self.client.chat.completions.create(
+                        model=self.model, max_tokens=max_tokens,
+                        messages=[{"role": "system", "content": system},
+                                  {"role": "user", "content": user}]),
+                    timeout=60.0,
+                )
+                text = resp.choices[0].message.content or ""
+                tok_in = resp.usage.prompt_tokens if resp.usage else 0
+                tok_out = resp.usage.completion_tokens if resp.usage else 0
+                cost = _compute_cost(self.model, tok_in, tok_out)
+                return text, tok_in, tok_out, cost
+            except (openai.RateLimitError, openai.APIStatusError) as exc:
+                last_exc = exc
+                if attempt < 2:
+                    await asyncio.sleep(2.0 ** attempt * 5)  # 5s, 10s
+                continue
+            except asyncio.TimeoutError as exc:
+                last_exc = exc
+                break
+        raise last_exc
 
     @staticmethod
     def _parse_json(content: str):
