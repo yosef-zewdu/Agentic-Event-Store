@@ -1,16 +1,23 @@
 services:
   # ---------------------------------------------------------------------------
-  # Backend_API — FastAPI viewer + MCP server
-  # Uses POOLED Neon connection string (many short-lived request connections)
+  # Backend_API — Production FastAPI (backend/main.py)
+  #
+  # Uses POOLED Neon connection string — many short-lived request connections
+  # via pgBouncer. The API is stateless; if the Worker_Service is down, commands
+  # still persist (events written to Neon) and projections return stale data
+  # until the worker restarts and catches up from its checkpoint.
+  #
+  # Documents are saved to a Render persistent disk mounted at /var/data/documents
+  # so uploaded files survive service restarts and redeploys.
   # ---------------------------------------------------------------------------
   - type: web
     name: ledger-api
     runtime: python
     buildCommand: pip install uv && uv sync --frozen --no-dev
-    startCommand: uvicorn src.api.app:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DATABASE_URL
-        sync: false          # set in Render dashboard — use pooled Neon URL
+        sync: false            # Render dashboard — use POOLED Neon connection string
       - key: OPENROUTER_API_KEY
         sync: false
       - key: OPENROUTER_MODEL
@@ -21,14 +28,26 @@ services:
         value: INFO
       - key: PYTHONPATH
         value: .
-      # CORS — set to your Vercel frontend URL
+      # CORS — must match your Vercel frontend deployment URL exactly
       - key: FRONTEND_ORIGIN
-        sync: false          # e.g. https://your-app.vercel.app
+        sync: false            # e.g. https://apex-ledger.vercel.app
+      # Persistent disk mount path for uploaded documents
+      - key: DOCUMENTS_DIR
+        value: /var/data/documents
 
   # ---------------------------------------------------------------------------
-  # Worker_Service — ProjectionDaemon + OutboxProcessor
-  # Uses DIRECT (non-pooled) Neon connection string — required for LISTEN/NOTIFY
-  # and long-running transactions that pgBouncer transaction mode would break
+  # Worker_Service — ProjectionDaemon + OutboxProcessor + PipelineWorker
+  #
+  # Uses DIRECT (non-pooled) Neon connection string — required because:
+  #   - ProjectionDaemon holds a persistent LISTEN/NOTIFY connection
+  #   - pgBouncer transaction mode breaks LISTEN/NOTIFY and long-running txns
+  #   - PipelineWorker runs multi-minute agent pipelines that must not be
+  #     interrupted by pgBouncer statement/transaction timeouts
+  #
+  # Three concurrent asyncio tasks (src/worker/main.py):
+  #   1. ProjectionDaemon  — keeps application_summary / compliance_audit_view current
+  #   2. OutboxProcessor   — delivers transactional outbox rows
+  #   3. PipelineWorker    — polls pipeline_jobs every 5s, runs queued agent pipelines
   # ---------------------------------------------------------------------------
   - type: worker
     name: ledger-worker
@@ -37,8 +56,16 @@ services:
     startCommand: python -m src.worker.main
     envVars:
       - key: DATABASE_URL_DIRECT
-        sync: false          # set in Render dashboard — use direct (non-pooled) Neon URL
+        sync: false            # Render dashboard — use DIRECT (non-pooled) Neon connection string
+      - key: OPENROUTER_API_KEY
+        sync: false            # Required for PipelineWorker agent LLM calls
+      - key: OPENROUTER_MODEL
+        value: google/gemini-2.0-flash-001
+      - key: REGULATION_VERSION
+        value: 2026-Q1
       - key: LOG_LEVEL
         value: INFO
       - key: PYTHONPATH
         value: .
+      - key: DOCUMENTS_DIR
+        value: /var/data/documents
