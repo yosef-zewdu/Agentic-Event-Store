@@ -34,38 +34,8 @@ services:
       # Persistent disk mount path for uploaded documents
       - key: DOCUMENTS_DIR
         value: /var/data/documents
-
-  # ---------------------------------------------------------------------------
-  # Worker_Service — ProjectionDaemon + OutboxProcessor + PipelineWorker
-  #
-  # Uses DIRECT (non-pooled) Neon connection string — required because:
-  #   - ProjectionDaemon holds a persistent LISTEN/NOTIFY connection
-  #   - pgBouncer transaction mode breaks LISTEN/NOTIFY and long-running txns
-  #   - PipelineWorker runs multi-minute agent pipelines that must not be
-  #     interrupted by pgBouncer statement/transaction timeouts
-  #
-  # Three concurrent asyncio tasks (src/worker/main.py):
-  #   1. ProjectionDaemon  — keeps application_summary / compliance_audit_view current
-  #   2. OutboxProcessor   — delivers transactional outbox rows
-  #   3. PipelineWorker    — polls pipeline_jobs every 5s, runs queued agent pipelines
-  # ---------------------------------------------------------------------------
-  - type: worker
-    name: ledger-worker
-    runtime: python
-    buildCommand: pip install uv && uv sync --frozen --no-dev
-    startCommand: python -m src.worker.main
-    envVars:
+      # Direct (non-pooled) Neon connection — used by ProjectionDaemon, OutboxProcessor,
+      # and PipelineWorker which run as asyncio background tasks inside this web service.
+      # Required because pgBouncer transaction mode breaks LISTEN/NOTIFY and long-running txns.
       - key: DATABASE_URL_DIRECT
         sync: false            # Render dashboard — use DIRECT (non-pooled) Neon connection string
-      - key: OPENROUTER_API_KEY
-        sync: false            # Required for PipelineWorker agent LLM calls
-      - key: OPENROUTER_MODEL
-        value: google/gemini-2.0-flash-001
-      - key: REGULATION_VERSION
-        value: 2026-Q1
-      - key: LOG_LEVEL
-        value: INFO
-      - key: PYTHONPATH
-        value: .
-      - key: DOCUMENTS_DIR
-        value: /var/data/documents
